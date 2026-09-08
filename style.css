@@ -1,0 +1,418 @@
+/* ==========================================================
+   AgroVision AI Cybernetic Theme
+========================================================== */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+html, body, [class*="st-key"] {
+    font-family: 'Poppins', sans-serif;
+    background: #0B1220;
+    color: #F8FAFC;
+}
+
+#MainMenu, footer {
+    visibility: hidden;
+    display: none;
+}
+
+header[data-testid="stHeader"] {
+    background: transparent;
+    height: 3rem;
+}
+
+.main {
+    background:
+        radial-gradient(circle at 10% 0%, rgba(34, 197, 94, 0.06) 0%, transparent 45%),
+        radial-gradient(circle at 90% 10%, rgba(56, 189, 248, 0.05) 0%, transparent 45%),
+        #0B1220;
+}
+
+.block-container {
+    padding-top: 2rem;
+}
+
+/* ==========================================================
+   HERO / TITLE HUD
+========================================================== */
+.hero {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.hero-badge {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: #4ADE80;
+    background: rgba(74, 222, 128, 0.08);
+    border: 1px solid rgba(74, 222, 128, 0.3);
+    padding: 5px 14px;
+    border-radius: 100px;
+    margin-bottom: 14px;
+}
+
+.hero-badge::before {
+    content: "●";
+    color: #4ADE80;
+    margin-right: 6px;
+    animation: pulseDot 1.8s ease-in-out infinite;
+}
+
+@keyframes pulseDot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.title {
+    font-size: 42px;
+    font-weight: 700;
+    color: #F8FAFC;
+    letter-spacing: -1px;
+    margin-bottom: 6px;
+}
+
+.subtitle {
+    color: #94A3B8;
+    font-size: 15px;
+    font-weight: 300;
+}
+
+h3 {
+    color: #38BDF8 !important;
+    font-weight: 600 !important;
+    font-size: 17px !important;
+    letter-spacing: 0.2px;
+    margin-bottom: 12px !important;
+}
+
+/* ==========================================================
+   SIDEBAR
+========================================================== */
+section[data-testid="stSidebar"] {
+    background: #080D17 !important;
+    border-right: 1px solid #1E293B;
+}
+
+.sidebar-title {
+    color: #4ADE80 !important;
+    font-size: 19px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.sidebar-divider {
+    border: none;
+    border-top: 1px solid #1E293B;
+    margin: 18px 0 14px 0;
+}
+
+.sidebar-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 1.2px;
+    color: #64748B;
+    margin-bottom: 6px;
+}
+
+.sidebar-info {
+    margin-top: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #64748B;
+    background: #0F172A;
+    border: 1px solid #1E293B;
+    border-radius: 8px;
+    padding: 10px 12px;
+    line-height: 1.7;
+    word-break: break-all;
+}
+
+.sidebar-info b {
+    color: #38BDF8;
+}
+
+/* ==========================================================
+   COCKPIT CARD LAYOUT
+========================================================== */
+.card {
+    background: #131B2C;
+    padding: 22px;
+    border-radius: 16px;
+    border: 1px solid #263145;
+    box-shadow: 0px 12px 32px rgba(0, 0, 0, 0.25);
+}
+
+.card-divider {
+    border: none;
+    border-top: 1px solid #263145;
+    margin: 18px 0 14px 0;
+}
+
+.action-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: #64748B;
+    margin-bottom: 6px;
+}
+
+.action-text {
+    font-size: 15px;
+    color: #E2E8F0;
+    line-height: 1.5;
+    margin: 0;
+}
+
+/* ==========================================================
+   STATUS PILLS
+========================================================== */
+.pill {
+    display: inline-block;
+    padding: 7px 16px;
+    border-radius: 100px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    margin-bottom: 16px;
+}
+
+.pill-ok {
+    background: rgba(34, 197, 94, 0.12);
+    color: #4ADE80;
+    border: 1px solid rgba(34, 197, 94, 0.4);
+}
+
+.pill-warn {
+    background: rgba(250, 204, 21, 0.1);
+    color: #FACC15;
+    border: 1px solid rgba(250, 204, 21, 0.35);
+}
+
+/* ==========================================================
+   METRIC GRID (legacy custom HTML metrics — kept for anything
+   still using the raw markdown version)
+========================================================== */
+.metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin-top: 4px;
+}
+
+.metric {
+    background: #0F172A;
+    border: 1px solid #263145;
+    border-radius: 10px;
+    padding: 12px 14px;
+}
+
+.metric-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.8px;
+    color: #64748B;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+}
+
+.metric-value {
+    font-size: 16px;
+    font-weight: 600;
+    color: #4ADE80;
+    word-break: break-word;
+}
+
+/* ==========================================================
+   NATIVE st.metric STYLING — used by the diagnosis panel for
+   Species / Condition / Confidence / Severity. Streamlit's default
+   metric styling is small and plain; this makes it match the
+   cybernetic HUD look and stay clearly readable (bigger, bolder
+   text as requested).
+========================================================== */
+div[data-testid="stMetric"] {
+    background: #0F172A;
+    border: 1px solid #263145;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 8px;
+}
+
+div[data-testid="stMetricLabel"] {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px !important;
+    letter-spacing: 0.8px;
+    color: #64748B !important;
+    text-transform: uppercase;
+}
+
+div[data-testid="stMetricValue"] {
+    font-size: 22px !important;
+    font-weight: 700 !important;
+    color: #4ADE80 !important;
+    word-break: break-word;
+}
+
+/* Expander used for the "Objects detected" ticker */
+div[data-testid="stExpander"] {
+    background: #0F172A;
+    border: 1px solid #263145;
+    border-radius: 10px;
+}
+
+/* ==========================================================
+   SCAN LINE IMAGE WRAPPER — the single combined image with the
+   animated green scan line drawn over it (render_combined_scan_image
+   in app.py). Matches the same cybernetic border/glow as .camera-box.
+========================================================== */
+.scan-wrap {
+    border-radius: 16px !important;
+}
+
+/* ==========================================================
+   ROVER CAMERA BOUNDS
+========================================================== */
+.camera-box {
+    border: 1px solid #22C55E;
+    border-radius: 16px;
+    padding: 8px;
+    position: relative;
+    overflow: hidden;
+    background: #020617;
+    box-shadow: 0 0 24px rgba(34, 197, 94, 0.12);
+}
+
+/* ==========================================================
+   NATIVE STREAMLIT OVERRIDES
+========================================================== */
+.stButton>button {
+    width: 100%;
+    height: 48px;
+    border-radius: 10px;
+    border: 1px solid #22C55E !important;
+    background: rgba(34, 197, 94, 0.08) !important;
+    color: #4ADE80 !important;
+    font-size: 14.5px !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.2px;
+    transition: all 0.25s ease !important;
+}
+
+.stButton>button:hover {
+    background: #22C55E !important;
+    color: #0B1220 !important;
+    box-shadow: 0 0 18px rgba(34, 197, 94, 0.35);
+    transform: translateY(-1px);
+}
+
+.stTextInput input {
+    background: #0F172A !important;
+    border: 1px solid #263145 !important;
+    color: #E2E8F0 !important;
+    border-radius: 8px !important;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px !important;
+}
+
+div[role="radiogroup"] label {
+    color: #CBD5E1 !important;
+}
+
+img {
+    border-radius: 10px;
+}
+
+.fade {
+    animation: fadeFrameIn 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes fadeFrameIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.footer {
+    text-align: center;
+    color: #475569;
+    margin-top: 50px;
+    font-size: 12px;
+    border-top: 1px solid #1E293B;
+    padding-top: 15px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.4px;
+}
+
+/* ==========================================================
+   MOBILE RESPONSIVE — this app is destined for a mobile shell,
+   so narrow viewports need to actually look intentional, not
+   just "the desktop layout, squeezed."
+========================================================== */
+@media (max-width: 600px) {
+    .block-container {
+        padding-top: 1rem;
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+    }
+
+    .title {
+        font-size: 28px;
+        letter-spacing: -0.5px;
+    }
+
+    .subtitle {
+        font-size: 13px;
+    }
+
+    .hero-badge {
+        font-size: 10px;
+        padding: 4px 10px;
+    }
+
+    h3 {
+        font-size: 15px !important;
+    }
+
+    /* Metrics stack to a single column instead of squeezing 4-wide */
+    .metric-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+
+    .metric {
+        padding: 10px 12px;
+    }
+
+    .metric-value {
+        font-size: 14px;
+    }
+
+    div[data-testid="stMetricValue"] {
+        font-size: 18px !important;
+    }
+
+    .card {
+        padding: 16px;
+        border-radius: 12px;
+    }
+
+    /* Buttons stay comfortably tappable (44px+ is the standard
+       minimum touch target) without ballooning on small screens */
+    .stButton>button {
+        height: 46px;
+        font-size: 14px !important;
+    }
+
+    .camera-box {
+        border-radius: 12px;
+        padding: 6px;
+    }
+
+    .sidebar-info {
+        font-size: 10px;
+    }
+}
+
+@media (max-width: 400px) {
+    .metric-grid {
+        grid-template-columns: 1fr;
+    }
+}
