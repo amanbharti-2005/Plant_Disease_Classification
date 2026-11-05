@@ -1,5 +1,24 @@
+
+# Virtual Environment
 .venv/
+venv/
+env/
+
+# Environment variables and secrets
 .env
+.env.*
+!.env.example
+
+# Python cache
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# IDE
 .vscode/
+
+# Logs
+*.log

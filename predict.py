@@ -1,302 +1,737 @@
 import os
-import tensorflow as tf
-import numpy as np
+import tempfile
+import json
+
 import cv2
+import numpy as np
+import tensorflow as tf
 from ultralytics import YOLO
+
+import config
 from utils.preprocessing import preprocess_image
 from utils.class_names import CLASS_NAMES
-import config
 
-disease_model = tf.keras.models.load_model(config.DISEASE_MODEL_PATH)
-yolo_model = YOLO(config.YOLO_GENERAL_MODEL_PATH)
-COCO_NAMES = yolo_model.names
 
-weed_model = YOLO(config.WEED_MODEL_PATH) if config.ENABLE_WEED_DETECTION else None
-if weed_model is not None:
-    print(f"[predict] Weed detection ENABLED — using {config.WEED_MODEL_PATH}")
-else:
-    print(f"[predict] Weed detection disabled — no model found at {config.WEED_MODEL_PATH}")
+# ==========================================================
+# PATHS AND SETTINGS
+# ==========================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(BASE_DIR, "models")
 TEMP_DIR = os.path.join(BASE_DIR, "temp")
+
 os.makedirs(TEMP_DIR, exist_ok=True)
+
 TEMP_CROP_PATH = os.path.join(TEMP_DIR, "current_crop.jpg")
 
-# ==========================================================
-# NEW: confidence floor for the disease classifier.
-# Add this same constant to config.py so it's tunable in one place
-# like everything else:
-#     DISEASE_MIN_CONFIDENCE = 0.55
-# Below this threshold, the model's top guess is NOT trustworthy
-# enough to report as a diagnosis — it gets flagged instead of
-# silently reported (and silently written to the database) as if
-# it were a confident answer.
-# ==========================================================
-DISEASE_MIN_CONFIDENCE = getattr(config, "DISEASE_MIN_CONFIDENCE", 0.55)
+DISEASE_MIN_CONFIDENCE = float(config.DISEASE_MIN_CONFIDENCE)
+GENERAL_MIN_CONFIDENCE = float(config.GENERAL_MIN_CONFIDENCE)
+PLANT_MIN_CONFIDENCE = float(config.PLANT_MIN_CONFIDENCE)
+GREEN_RATIO_MIN = float(config.GREEN_RATIO_MIN)
+
 UNRECOGNIZED_LABEL = "Unrecognized / Low Confidence"
 
 
+# ==========================================================
+# LOAD MODELS
+# ==========================================================
+
+print("[predict] Loading disease classifier...")
+disease_model = tf.keras.models.load_model(
+    config.DISEASE_MODEL_PATH
+)
+
+print("[predict] Loading general YOLO...")
+yolo_model = YOLO(config.YOLO_GENERAL_MODEL_PATH)
+
+COCO_NAMES = yolo_model.names
+
+
+# Dedicated leaf detector
+leaf_model = None
+
+if config.ENABLE_LEAF_DETECTION:
+    print("[predict] Loading dedicated leaf detector...")
+    leaf_model = YOLO(config.LEAF_MODEL_PATH)
+else:
+    print("[predict] Leaf detector not found.")
+
+
+# Pest classifier
+pest_model = None
+pest_class_names = []
+
+if config.ENABLE_PEST_CLASSIFICATION:
+    print("[predict] Loading IP102 pest classifier...")
+    pest_model = tf.keras.models.load_model(
+        config.PEST_MODEL_PATH
+    )
+
+    if os.path.exists(config.PEST_CLASS_NAMES_PATH):
+        try:
+            with open(
+                config.PEST_CLASS_NAMES_PATH,
+                "r",
+                encoding="utf-8"
+            ) as file:
+                pest_class_names = json.load(file)
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"[predict] Pest class names error: {exc}")
+
+print("[predict] Disease classifier: loaded")
+print("[predict] General YOLO: loaded")
+print("[predict] Leaf detector:", "loaded" if leaf_model else "unavailable")
+print("[predict] Pest classifier:", "loaded" if pest_model else "unavailable")
+print("[predict] Weed detection: disabled")
+
+
+# ==========================================================
+# SPECIES AND CONDITION PARSING
+# ==========================================================
+
 def split_species_condition(disease_name):
-    name = disease_name
-    for sep in ("___", "__", "-"):
-        if sep in name:
-            species_raw, condition_raw = name.split(sep, 1)
+
+    name = str(disease_name)
+
+    for separator in ("___", "__", "-"):
+
+        if separator in name:
+
+            species_raw, condition_raw = name.split(
+                separator,
+                1
+            )
+
             species = species_raw.replace("_", " ").strip()
             condition = condition_raw.replace("_", " ").strip()
+
             return species, condition
+
     if "_" in name:
+
         species_raw, condition_raw = name.split("_", 1)
-        return species_raw.replace("_", " ").strip(), condition_raw.replace("_", " ").strip()
+
+        return (
+            species_raw.replace("_", " ").strip(),
+            condition_raw.replace("_", " ").strip()
+        )
+
     return "Unspecified Species", name.replace("_", " ")
 
 
-def draw_tech_borders(img, x1, y1, x2, y2, label):
-    color = (0, 255, 0)
-    thickness = 2
-    line_length = 20
-    cv2.rectangle(img, (x1, y1), (x2, y2), color, 1)
-    cv2.line(img, (x1, y1), (x1 + line_length, y1), color, thickness + 2)
-    cv2.line(img, (x1, y1), (x1, y1 + line_length), color, thickness + 2)
-    cv2.line(img, (x2, y1), (x2 - line_length, y1), color, thickness + 2)
-    cv2.line(img, (x2, y1), (x2, y1 + line_length), color, thickness + 2)
-    cv2.line(img, (x1, y2), (x1 + line_length, y2), color, thickness + 2)
-    cv2.line(img, (x1, y2), (x1, y2 - line_length), color, thickness + 2)
-    cv2.line(img, (x2, y2), (x2 - line_length, y2), color, thickness + 2)
-    cv2.line(img, (x2, y2), (x2, y2 - line_length), color, thickness + 2)
+# ==========================================================
+# BOUNDING BOX VALIDATION
+# ==========================================================
 
-    # ==========================================================
-    # Readable label: green text directly on a green leaf was
-    # illegible (text blended into the background). Draw a solid
-    # dark background strip behind the text first, then white text
-    # on top — readable regardless of what's behind it.
-    # ==========================================================
-    label_text = label.upper()
+def valid_box(box, width, height):
+
+    x1, y1, x2, y2 = [int(v) for v in box]
+
+    x1 = max(0, min(x1, width - 1))
+    y1 = max(0, min(y1, height - 1))
+
+    x2 = max(0, min(x2, width))
+    y2 = max(0, min(y2, height))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return x1, y1, x2, y2
+
+
+# ==========================================================
+# DRAW DIAGNOSTIC LABEL
+# ==========================================================
+
+def draw_tech_borders(img, x1, y1, x2, y2, label):
+
+    out = img.copy()
+
+    h, w = out.shape[:2]
+
+    x1 = max(0, min(int(x1), w - 1))
+    y1 = max(0, min(int(y1), h - 1))
+
+    x2 = max(x1 + 1, min(int(x2), w - 1))
+    y2 = max(y1 + 1, min(int(y2), h - 1))
+
+    color = (0, 255, 0)
+
+    cv2.rectangle(
+        out,
+        (x1, y1),
+        (x2, y2),
+        color,
+        2
+    )
+
+    label_text = str(label).upper()
+
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.5
-    font_thickness = 2
-    (text_w, text_h), baseline = cv2.getTextSize(label_text, font, font_scale, font_thickness)
+    thickness = 2
+
+    (text_w, text_h), baseline = cv2.getTextSize(
+        label_text,
+        font,
+        font_scale,
+        thickness
+    )
 
     text_x = x1
-    text_y = max(20, y1 - 10)
-    padding = 4
+    text_y = max(text_h + 10, y1 - 10)
+
+    padding = 5
+
     cv2.rectangle(
-        img,
-        (text_x - padding, text_y - text_h - padding),
-        (text_x + text_w + padding, text_y + baseline + padding),
+        out,
+        (text_x, max(0, text_y - text_h - padding)),
+        (
+            min(w - 1, text_x + text_w + padding * 2),
+            min(h - 1, text_y + baseline + padding)
+        ),
         (0, 0, 0),
-        -1,
+        -1
     )
-    cv2.putText(img, label_text, (text_x, text_y), font, font_scale, (255, 255, 255), font_thickness)
-    return img
 
+    cv2.putText(
+        out,
+        label_text,
+        (text_x + padding, text_y),
+        font,
+        font_scale,
+        (255, 255, 255),
+        thickness
+    )
 
-def draw_all_detections(img, boxes):
-    out = img.copy()
-    for det in boxes:
-        x1, y1, x2, y2 = det["bbox"]
-        color = (0, 100, 255) if det.get("is_weed") else (255, 200, 60)
-        label = f'{det["label"]} {int(det["confidence"] * 100)}%'
-        cv2.rectangle(out, (x1, y1), (x2, y2), color, 1)
-        cv2.putText(out, label, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
     return out
 
 
-def detect_weeds(frame):
-    if weed_model is None:
-        return [], 0
-    results = weed_model(frame, verbose=False)[0]
-    weed_boxes = []
-    for box in results.boxes:
-        conf = float(box.conf[0])
-        if conf < config.WEED_MIN_CONFIDENCE:
-            continue
-        xyxy = tuple(box.xyxy[0].cpu().numpy().astype(int))
-        weed_boxes.append({"bbox": xyxy, "label": "weed", "confidence": conf, "is_weed": True})
-    return weed_boxes, len(weed_boxes)
+# ==========================================================
+# DRAW ALL DETECTED OBJECTS
+# ==========================================================
+
+def draw_all_detections(img, boxes):
+
+    out = img.copy()
+
+    for det in boxes:
+
+        x1, y1, x2, y2 = det["bbox"]
+
+        color = (
+            (0, 255, 0)
+            if det.get("is_leaf")
+            else (255, 200, 60)
+        )
+
+        label = (
+            f'{det["label"]} '
+            f'{int(det["confidence"] * 100)}%'
+        )
+
+        cv2.rectangle(
+            out,
+            (x1, y1),
+            (x2, y2),
+            color,
+            2
+        )
+
+        cv2.putText(
+            out,
+            label,
+            (x1, max(15, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1
+        )
+
+    return out
 
 
-def predict_disease_pipeline(image_path):
-    empty_result = {
-        "disease": "Invalid Image", "species": "Unknown", "condition": "Invalid Image",
-        "confidence": 0.0, "labeled_frame": None, "cropped_leaf": None,
-        "all_objects_frame": None, "detected_objects": [], "weed_count": 0,
-        "low_confidence": False,
-    }
+# ==========================================================
+# GENERAL OBJECT DETECTION
+# ==========================================================
 
-    frame = cv2.imread(image_path)
-    if frame is None:
-        return empty_result
+def detect_general_objects(frame):
 
-    h, w, _ = frame.shape
-    yolo_results = yolo_model(frame, verbose=False)[0]
+    results = yolo_model(
+        frame,
+        verbose=False
+    )[0]
 
-    all_boxes = []
+    h, w = frame.shape[:2]
+
+    detected = []
     plant_bbox = None
-    best_plant_conf = 0.0
+    best_plant_confidence = 0.0
 
-    for box in yolo_results.boxes:
-        cls = int(box.cls[0])
-        conf = float(box.conf[0])
-        if conf < config.GENERAL_MIN_CONFIDENCE:
+    for box in results.boxes:
+
+        class_id = int(box.cls[0])
+        confidence = float(box.conf[0])
+
+        if confidence < GENERAL_MIN_CONFIDENCE:
             continue
-        xyxy = tuple(box.xyxy[0].cpu().numpy().astype(int))
-        label = COCO_NAMES.get(cls, f"class_{cls}")
-        all_boxes.append({"bbox": xyxy, "label": label, "confidence": conf, "is_weed": False})
-        if cls == config.PLANT_CLASS_ID and conf > config.PLANT_MIN_CONFIDENCE and conf > best_plant_conf:
-            plant_bbox = xyxy
-            best_plant_conf = conf
 
-    weed_boxes, weed_count = detect_weeds(frame)
-    all_boxes.extend(weed_boxes)
-
-    detected_objects = [
-        {"label": b["label"], "confidence": round(b["confidence"] * 100, 1)} for b in all_boxes
-    ]
-    all_objects_frame = draw_all_detections(frame, all_boxes)
-
-    # NOTE: this flag matters downstream. If YOLO never locks a proper
-    # plant/leaf box, we're about to classify the WHOLE raw frame
-    # (soil, rover chassis, background clutter and all) — which is a
-    # major silent source of "wrong answers". We surface that instead
-    # of hiding it.
-    plant_locked = plant_bbox is not None
-
-    if plant_locked:
-        x1, y1, x2, y2 = plant_bbox
-        pad_x = int((x2 - x1) * 0.1)
-        pad_y = int((y2 - y1) * 0.1)
-        crop_x1, crop_y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-        crop_x2, crop_y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
-        cropped_leaf = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-        lock_box = (x1, y1, x2, y2)
-    else:
-        lock_box = (0, 0, w, h)
-        cropped_leaf = frame
-
-    if cropped_leaf is None or cropped_leaf.size == 0:
-        cropped_leaf = frame
-
-    ok = cv2.imwrite(TEMP_CROP_PATH, cropped_leaf)
-    if not ok:
-        return {**empty_result, "all_objects_frame": all_objects_frame,
-                "detected_objects": detected_objects, "weed_count": weed_count}
-
-    # ==========================================================
-    # SANITY CHECK: does this even look like plant material?
-    # The disease classifier is a closed-set softmax model — given ANY
-    # image (a face, a wall, a shoe) it will still confidently pick
-    # whichever of its 51 known classes looks "closest", even if the
-    # image has nothing to do with a plant. Removing the plant_locked
-    # requirement earlier fixed false rejections on real leaf photos,
-    # but it also removed the only thing stopping totally unrelated
-    # images from reaching the classifier at all.
-    #
-    # This is a cheap, model-free heuristic: real leaf/plant photos are
-    # overwhelmingly green/vegetation-colored in HSV space. A human
-    # face, wall, or random object is not. If green content is too low,
-    # skip the classifier entirely and report no plant detected —
-    # rather than let the classifier force a confident wrong guess.
-    # Tune GREEN_RATIO_MIN in config.py if real leaf photos (unusual
-    # lighting, mostly-brown diseased tissue, etc.) start getting
-    # rejected by this check.
-    # ==========================================================
-    hsv_crop = cv2.cvtColor(cropped_leaf, cv2.COLOR_BGR2HSV)
-    # Broad "vegetation" hue range in OpenCV's HSV (H: 0-179): covers
-    # yellow-green through blue-green, with generous saturation/value
-    # floors so it still catches dull, dry, or diseased (brownish-green)
-    # leaf tissue, not just vivid healthy green.
-    green_mask = cv2.inRange(hsv_crop, (25, 30, 30), (95, 255, 255))
-
-    # Measure green content in the CENTER region only, not the whole
-    # crop. Whole-frame green% was too easy to fool — a person or
-    # object photographed in front of foliage/greenery can score high
-    # on background green alone, even though the actual subject in the
-    # middle of the frame isn't a plant at all. Restricting the check
-    # to the central ~60% of the frame (where the locked/cropped
-    # subject should be) makes background greenery much less able to
-    # rescue a non-plant subject.
-    ch, cw = green_mask.shape
-    y0, y1c = int(ch * 0.2), int(ch * 0.8)
-    x0, x1c = int(cw * 0.2), int(cw * 0.8)
-    center_mask = green_mask[y0:y1c, x0:x1c]
-    green_ratio = float(np.count_nonzero(center_mask)) / max(center_mask.size, 1)
-    GREEN_RATIO_MIN = getattr(config, "GREEN_RATIO_MIN", 0.20)
-
-    if green_ratio < GREEN_RATIO_MIN:
-        labeled_frame = draw_tech_borders(
-            frame.copy(), *lock_box,
-            f"NO PLANT DETECTED ({green_ratio * 100:.0f}% green)"
+        bbox = valid_box(
+            box.xyxy[0].cpu().numpy(),
+            w,
+            h
         )
-        return {
-            "disease": UNRECOGNIZED_LABEL,
-            "species": "Unknown",
-            "condition": UNRECOGNIZED_LABEL,
-            "confidence": 0.0,
-            "labeled_frame": labeled_frame,
-            "cropped_leaf": cropped_leaf,
-            "all_objects_frame": all_objects_frame,
-            "detected_objects": detected_objects,
-            "weed_count": weed_count,
-            "low_confidence": True,
-            "plant_locked": plant_locked,
-        }
 
-    processed_img = preprocess_image(TEMP_CROP_PATH)
-    predictions = disease_model.predict(processed_img, verbose=False)
-    pred_probabilities = predictions[0]
-    predicted_index = int(np.argmax(pred_probabilities))
+        if bbox is None:
+            continue
 
-    disease_name = CLASS_NAMES[predicted_index]
-    confidence_score = float(pred_probabilities[predicted_index])
-    species, condition = split_species_condition(disease_name)
+        if isinstance(COCO_NAMES, dict):
+            label = COCO_NAMES.get(
+                class_id,
+                f"class_{class_id}"
+            )
+        else:
+            label = str(class_id)
 
-    # ==========================================================
-    # Confidence-gate the final answer — based ONLY on the disease
-    # classifier's own confidence, not on whether YOLO's generic COCO
-    # "potted plant" class happened to fire.
-    #
-    # NOTE: plant_locked is intentionally NOT part of this condition
-    # anymore. COCO's "potted plant" class is trained on full potted
-    # houseplants, not close-up leaf macro shots — on real greenhouse/
-    # rover photos it almost never fires, which was previously forcing
-    # every single scan into "Unrecognized" regardless of how confident
-    # the actual disease classifier was. plant_locked is still tracked
-    # and returned (useful for debugging / UI display), it just no
-    # longer gates the diagnosis itself.
-    # ==========================================================
-    is_uncertain = confidence_score < DISEASE_MIN_CONFIDENCE
+        detected.append({
+            "bbox": bbox,
+            "label": str(label),
+            "confidence": confidence,
+            "is_leaf": False
+        })
 
-    if is_uncertain:
-        labeled_frame = draw_tech_borders(
-            frame.copy(), *lock_box,
-            f"LOW CONFIDENCE ({confidence_score * 100:.0f}%)"
+        if (
+            class_id == config.PLANT_CLASS_ID
+            and confidence >= PLANT_MIN_CONFIDENCE
+            and confidence > best_plant_confidence
+        ):
+
+            plant_bbox = bbox
+            best_plant_confidence = confidence
+
+    return detected, plant_bbox
+
+
+# ==========================================================
+# DEDICATED LEAF DETECTION
+# ==========================================================
+
+def detect_leaves(frame):
+
+    if leaf_model is None:
+        return []
+
+    results = leaf_model(
+        frame,
+        verbose=False
+    )[0]
+
+    h, w = frame.shape[:2]
+
+    leaf_boxes = []
+    names = leaf_model.names
+
+    for box in results.boxes:
+
+        confidence = float(box.conf[0])
+
+        if confidence < PLANT_MIN_CONFIDENCE:
+            continue
+
+        bbox = valid_box(
+            box.xyxy[0].cpu().numpy(),
+            w,
+            h
         )
-        return {
-            "disease": UNRECOGNIZED_LABEL,
-            "species": species,          # kept for reference/debugging in the UI
-            "condition": UNRECOGNIZED_LABEL,
-            "confidence": confidence_score,
-            "labeled_frame": labeled_frame,
-            "cropped_leaf": cropped_leaf,
-            "all_objects_frame": all_objects_frame,
-            "detected_objects": detected_objects,
-            "weed_count": weed_count,
-            "low_confidence": True,
-            "plant_locked": plant_locked,
-        }
 
-    labeled_frame = draw_tech_borders(frame.copy(), *lock_box, f"{species}: {condition}")
+        if bbox is None:
+            continue
+
+        class_id = int(box.cls[0])
+
+        if isinstance(names, dict):
+            label = names.get(
+                class_id,
+                f"class_{class_id}"
+            )
+        else:
+            label = (
+                names[class_id]
+                if class_id < len(names)
+                else f"class_{class_id}"
+            )
+
+        leaf_boxes.append({
+            "bbox": bbox,
+            "label": str(label),
+            "confidence": confidence,
+            "is_leaf": True
+        })
+
+    return leaf_boxes
+
+
+# ==========================================================
+# EMPTY RESULT
+# ==========================================================
+
+def empty_result():
 
     return {
-        "disease": disease_name,
+        "disease": "Invalid Image",
+        "species": "Unknown",
+        "condition": "Invalid Image",
+        "confidence": 0.0,
+
+        "labeled_frame": None,
+        "cropped_leaf": None,
+        "all_objects_frame": None,
+        "bounding_box_image": None,
+
+        "detected_objects": [],
+
+        "low_confidence": False,
+        "plant_locked": False,
+        "leaf_count": 0,
+
+        "pest": None,
+        "pest_confidence": 0.0,
+        "pest_model_available": pest_model is not None,
+        "pest_status": (
+            "Classifier loaded; pest detector not configured"
+            if pest_model is not None
+            else "Pest classifier unavailable"
+        ),
+
+        "green_ratio": 0.0
+    }
+
+
+# ==========================================================
+# MAIN DISEASE PREDICTION PIPELINE
+# ==========================================================
+
+def predict_disease_pipeline(image_path):
+
+    result_empty = empty_result()
+
+    frame = cv2.imread(image_path)
+
+    if frame is None:
+        return result_empty
+
+    h, w = frame.shape[:2]
+
+    # ------------------------------------------------------
+    # STEP 1: GENERAL YOLO DETECTION
+    # ------------------------------------------------------
+
+    print("[AI] Running general object detection...", flush=True)
+
+    general_boxes, plant_bbox = detect_general_objects(frame)
+
+    # ------------------------------------------------------
+    # STEP 2: LEAF DETECTION
+    # ------------------------------------------------------
+
+    print("[AI] Running dedicated leaf detection...", flush=True)
+
+    leaf_boxes = detect_leaves(frame)
+
+    # Prefer the highest-confidence dedicated leaf detection.
+    best_leaf = max(
+        leaf_boxes,
+        key=lambda item: item["confidence"],
+        default=None
+    )
+
+    if best_leaf is not None:
+        plant_bbox = best_leaf["bbox"]
+
+    plant_locked = plant_bbox is not None
+
+    all_boxes = general_boxes + leaf_boxes
+
+    detected_objects = [
+        {
+            "label": item["label"],
+            "confidence": round(
+                float(item["confidence"]) * 100,
+                1
+            ),
+            "bbox": list(item["bbox"])
+        }
+        for item in all_boxes
+    ]
+
+    all_objects_frame = draw_all_detections(
+        frame,
+        all_boxes
+    )
+
+    # ------------------------------------------------------
+    # STEP 3: SELECT PLANT / LEAF CROP
+    # ------------------------------------------------------
+
+    if not plant_locked:
+
+        lock_box = (0, 0, w - 1, h - 1)
+
+        labeled_frame = draw_tech_borders(
+            frame,
+            *lock_box,
+            "NO PLANT OR LEAF DETECTED"
+        )
+
+        return {
+            **result_empty,
+            "disease": UNRECOGNIZED_LABEL,
+            "condition": UNRECOGNIZED_LABEL,
+            "labeled_frame": labeled_frame,
+            "all_objects_frame": all_objects_frame,
+            "bounding_box_image": all_objects_frame,
+            "detected_objects": detected_objects,
+            "low_confidence": True,
+            "leaf_count": len(leaf_boxes)
+        }
+
+    x1, y1, x2, y2 = plant_bbox
+
+    pad_x = int((x2 - x1) * 0.08)
+    pad_y = int((y2 - y1) * 0.08)
+
+    crop_x1 = max(0, x1 - pad_x)
+    crop_y1 = max(0, y1 - pad_y)
+
+    crop_x2 = min(w, x2 + pad_x)
+    crop_y2 = min(h, y2 + pad_y)
+
+    cropped_leaf = frame[
+        crop_y1:crop_y2,
+        crop_x1:crop_x2
+    ]
+
+    if cropped_leaf.size == 0:
+        return {
+            **result_empty,
+            "all_objects_frame": all_objects_frame,
+            "bounding_box_image": all_objects_frame,
+            "detected_objects": detected_objects,
+            "leaf_count": len(leaf_boxes)
+        }
+
+    # ------------------------------------------------------
+    # STEP 4: VEGETATION SANITY CHECK
+    # ------------------------------------------------------
+
+    hsv_crop = cv2.cvtColor(
+        cropped_leaf,
+        cv2.COLOR_BGR2HSV
+    )
+
+    green_mask = cv2.inRange(
+        hsv_crop,
+        (25, 30, 30),
+        (95, 255, 255)
+    )
+
+    ch, cw = green_mask.shape
+
+    y_start = int(ch * 0.2)
+    y_end = max(int(ch * 0.8), 1)
+
+    x_start = int(cw * 0.2)
+    x_end = max(int(cw * 0.8), 1)
+
+    center_mask = green_mask[
+        y_start:y_end,
+        x_start:x_end
+    ]
+
+    green_ratio = (
+        float(np.count_nonzero(center_mask))
+        / max(center_mask.size, 1)
+    )
+
+    if green_ratio < GREEN_RATIO_MIN:
+
+        labeled_frame = draw_tech_borders(
+            frame,
+            *plant_bbox,
+            f"LOW VEGETATION COLOR ({green_ratio * 100:.1f}%)"
+        )
+
+        return {
+            **result_empty,
+            "disease": UNRECOGNIZED_LABEL,
+            "condition": UNRECOGNIZED_LABEL,
+            "labeled_frame": labeled_frame,
+            "cropped_leaf": cropped_leaf,
+            "all_objects_frame": all_objects_frame,
+            "bounding_box_image": all_objects_frame,
+            "detected_objects": detected_objects,
+            "low_confidence": True,
+            "plant_locked": True,
+            "leaf_count": len(leaf_boxes),
+            "green_ratio": green_ratio
+        }
+
+    # ------------------------------------------------------
+    # STEP 5: SAVE CROP FOR DISEASE CLASSIFICATION
+    # ------------------------------------------------------
+
+    if not cv2.imwrite(TEMP_CROP_PATH, cropped_leaf):
+
+        raise RuntimeError(
+            "Could not save the selected leaf crop."
+        )
+
+    try:
+
+        processed_img = preprocess_image(
+            TEMP_CROP_PATH
+        )
+
+        print("[AI] Running disease classifier...", flush=True)
+
+        predictions = disease_model.predict(
+            processed_img,
+            verbose=0
+        )
+
+    finally:
+
+        if os.path.exists(TEMP_CROP_PATH):
+            try:
+                os.remove(TEMP_CROP_PATH)
+            except OSError:
+                pass
+
+    # ------------------------------------------------------
+    # STEP 6: DISEASE CLASSIFICATION
+    # ------------------------------------------------------
+
+    probabilities = np.asarray(predictions[0])
+
+    predicted_index = int(
+        np.argmax(probabilities)
+    )
+
+    confidence = float(
+        probabilities[predicted_index]
+    )
+
+    if predicted_index < len(CLASS_NAMES):
+        disease_name = str(
+            CLASS_NAMES[predicted_index]
+        )
+    else:
+        disease_name = f"class_{predicted_index}"
+
+    species, condition = split_species_condition(
+        disease_name
+    )
+
+    low_confidence = (
+        confidence < DISEASE_MIN_CONFIDENCE
+    )
+
+    if low_confidence:
+
+        disease_output = UNRECOGNIZED_LABEL
+        condition_output = UNRECOGNIZED_LABEL
+
+        display_label = (
+            f"LOW DISEASE CONFIDENCE "
+            f"({confidence * 100:.1f}%)"
+        )
+
+    else:
+
+        disease_output = disease_name
+        condition_output = condition
+
+        display_label = f"{species}: {condition}"
+
+    labeled_frame = draw_tech_borders(
+        frame,
+        *plant_bbox,
+        display_label
+    )
+
+    # ------------------------------------------------------
+    # STEP 7: FINAL RESULT
+    # ------------------------------------------------------
+
+    return {
+        "disease": disease_output,
         "species": species,
-        "condition": condition,
-        "confidence": confidence_score,
+        "condition": condition_output,
+        "confidence": confidence,
+
         "labeled_frame": labeled_frame,
         "cropped_leaf": cropped_leaf,
         "all_objects_frame": all_objects_frame,
+        "bounding_box_image": all_objects_frame,
+
         "detected_objects": detected_objects,
-        "weed_count": weed_count,
-        "low_confidence": False,
+
+        "low_confidence": low_confidence,
         "plant_locked": plant_locked,
+        "leaf_count": len(leaf_boxes),
+
+        # IP102 classifier is available, but no pest detector
+        # currently identifies insect crops.
+        "pest": None,
+        "pest_confidence": 0.0,
+        "pest_model_available": pest_model is not None,
+        "pest_status": (
+            "Classifier loaded; pest bounding-box detector not configured"
+            if pest_model is not None
+            else "Pest classifier unavailable"
+        ),
+
+        "green_ratio": green_ratio
     }
+
+
+# ==========================================================
+# LIVE CAMERA FRAME PIPELINE
+# ==========================================================
+
+def predict_frame_pipeline(frame):
+
+    if (
+        frame is None
+        or not hasattr(frame, "size")
+        or frame.size == 0
+    ):
+        return empty_result()
+
+    temp_path = None
+
+    try:
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".png",
+            delete=False
+        ) as temp_file:
+
+            temp_path = temp_file.name
+
+        if not cv2.imwrite(temp_path, frame):
+
+            raise RuntimeError(
+                "Could not save the live camera frame."
+            )
+
+        return predict_disease_pipeline(temp_path)
+
+    finally:
+
+        if temp_path and os.path.exists(temp_path):
+
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass

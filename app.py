@@ -1,398 +1,1781 @@
-import streamlit as st
+import base64
+import html
+from typing import Optional
+
 import cv2
 import numpy as np
 import requests
-import base64
+import streamlit as st
 import config
 
-# ==========================================
+from services.live_monitor import LiveMonitor
+from services.live_inference import LiveInferenceWorker
+
+
+# ============================================================
 # PAGE CONFIGURATION
-# ==========================================
-st.set_page_config(page_title="AgroVision Rover HUD", page_icon="🛰️", layout="wide", initial_sidebar_state="expanded")
+# ============================================================
+
+st.set_page_config(
+    page_title="AgroVision Rover HUD",
+    page_icon="🛰️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ============================================================
+# PROFESSIONAL UI STYLING
+# ============================================================
 
 try:
-    with open("style.css", "r", encoding="utf-8") as f:
-        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+    with open("style.css", "r", encoding="utf-8") as css_file:
+        st.markdown(
+            f"<style>{css_file.read()}</style>",
+            unsafe_allow_html=True,
+        )
 except FileNotFoundError:
-    st.error("style.css file not found! Please ensure it is in the same directory.")
-
-st.markdown("""
-<div class='hero'>
-    <div class='hero-badge'>ROVER OPS · LIVE</div>
-    <div class='title'>AgroVision Rover HUD</div>
-    <div class='subtitle'>Autonomous Field Object Tracking &amp; Plant Disease Diagnostics</div>
-</div>
-""", unsafe_allow_html=True)
-
-# ==========================================
-# CONFIGURATION & STATE INITIALIZATION
-# ==========================================
-FASTAPI_URL = "http://127.0.0.1:8001/predict"
-ASK_URL = "http://127.0.0.1:8001/ask"
-
-if "esp32_ip" not in st.session_state:
-    st.session_state.esp32_ip = "192.168.1.38"
-if "gps_ip" not in st.session_state:
-    st.session_state.gps_ip = "192.168.1.50"
-if "frozen_frame" not in st.session_state:
-    st.session_state.frozen_frame = None
-if "api_results" not in st.session_state:
-    st.session_state.api_results = None
-if "manual_api_results" not in st.session_state:
-    st.session_state.manual_api_results = None
+    pass
 
 
-def get_image_base64(img_array_rgb):
-    bgr = cv2.cvtColor(img_array_rgb, cv2.COLOR_RGB2BGR)
-    _, buffer = cv2.imencode('.jpg', bgr)
-    return f"data:image/jpeg;base64,{base64.b64encode(buffer).decode('utf-8')}"
+st.markdown(
+    """
+    <style>
+    @import url(
+      'https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap'
+    );
 
+    :root {
+      --av-bg: #07110d;
+      --av-panel: #0d1b14;
+      --av-panel-2: #102319;
+      --av-line: rgba(148, 163, 184, .16);
+      --av-green: #7ee787;
+      --av-green-2: #28c76f;
+      --av-muted: #91a69a;
+      --av-text: #edf7ef;
+    }
+
+    html, body, [class*="css"] {
+      font-family: 'DM Sans', sans-serif;
+    }
+
+    .stApp {
+      background:
+        radial-gradient(
+          ellipse at 12% 0%,
+          rgba(34,197,94,.12),
+          transparent 34%
+        ),
+        radial-gradient(
+          ellipse at 92% 12%,
+          rgba(20,184,166,.08),
+          transparent 30%
+        ),
+        linear-gradient(
+          145deg,
+          #07110d 0%,
+          #091710 48%,
+          #07110d 100%
+        );
+      color: var(--av-text);
+    }
+
+    [data-testid="stHeader"] {
+      background: rgba(7,17,13,.72);
+      backdrop-filter: blur(14px);
+    }
+
+    [data-testid="stSidebar"] {
+      background: linear-gradient(
+        180deg,
+        #0b1912 0%,
+        #08130e 100%
+      );
+      border-right: 1px solid var(--av-line);
+    }
+
+    [data-testid="stSidebar"] > div:first-child {
+      padding-top: 1.4rem;
+    }
+
+    .block-container {
+      max-width: 1580px;
+      padding-top: 2rem;
+      padding-bottom: 3rem;
+    }
+
+    h1, h2, h3, h4 {
+      font-family: 'Space Grotesk', sans-serif !important;
+      letter-spacing: -.035em;
+      color: #f2fbf4 !important;
+    }
+
+    h2 {
+      font-size: 1.65rem !important;
+    }
+
+    h3 {
+      font-size: 1.2rem !important;
+    }
+
+    p, label, [data-testid="stMarkdownContainer"] {
+      color: #d6e5da;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 30px 34px;
+      margin: 0 0 24px 0;
+      border: 1px solid rgba(126,231,135,.24);
+      border-radius: 22px;
+      background:
+        linear-gradient(
+          110deg,
+          rgba(16,42,27,.97),
+          rgba(9,27,19,.92)
+        ),
+        radial-gradient(
+          circle at 85% 20%,
+          rgba(126,231,135,.16),
+          transparent 35%
+        );
+      box-shadow:
+        0 18px 55px rgba(0,0,0,.22),
+        inset 0 1px 0 rgba(255,255,255,.04);
+    }
+
+    .hero:after {
+      content: '';
+      position: absolute;
+      width: 260px;
+      height: 260px;
+      right: -70px;
+      top: -120px;
+      border: 1px solid rgba(126,231,135,.17);
+      border-radius: 50%;
+      box-shadow:
+        0 0 0 28px rgba(126,231,135,.025),
+        0 0 0 58px rgba(126,231,135,.02);
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 11px;
+      border: 1px solid rgba(126,231,135,.28);
+      border-radius: 99px;
+      background: rgba(34,197,94,.10);
+      color: #9af5a5;
+      font: 700 10px 'DM Sans', sans-serif;
+      letter-spacing: .16em;
+    }
+
+    .hero-badge:before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #7ee787;
+      box-shadow: 0 0 12px #7ee787;
+    }
+
+    .hero .title {
+      position: relative;
+      z-index: 1;
+      margin-top: 13px;
+      color: #f4fff6;
+      font: 700 clamp(2rem, 4vw, 3.15rem)
+        'Space Grotesk', sans-serif;
+      letter-spacing: -.055em;
+    }
+
+    .hero .subtitle {
+      position: relative;
+      z-index: 1;
+      margin-top: 5px;
+      color: #a8c1ae;
+      font-size: .98rem;
+    }
+
+    .sidebar-title {
+      font: 700 1.2rem 'Space Grotesk', sans-serif;
+      color: #eaffed;
+    }
+
+    .sidebar-label {
+      color: #8fa99a;
+      font-size: .68rem;
+      font-weight: 700;
+      letter-spacing: .13em;
+    }
+
+    .sidebar-info {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid var(--av-line);
+      border-radius: 12px;
+      background: rgba(255,255,255,.025);
+      color: #a8c1ae;
+      font-size: .72rem;
+      overflow-wrap: anywhere;
+      line-height: 1.8;
+    }
+
+    div[data-testid="stMetric"] {
+      padding: 15px 17px;
+      border: 1px solid var(--av-line);
+      border-radius: 15px;
+      background: linear-gradient(
+        145deg,
+        rgba(17,39,26,.94),
+        rgba(10,25,17,.94)
+      );
+      box-shadow: 0 8px 24px rgba(0,0,0,.12);
+    }
+
+    div[data-testid="stMetric"] label {
+      color: #91aa99 !important;
+      font-size: .76rem !important;
+      font-weight: 600 !important;
+    }
+
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+      color: #eaffed !important;
+      font-family: 'Space Grotesk', sans-serif;
+    }
+
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+      border-color: var(--av-line) !important;
+      border-radius: 17px !important;
+      background: rgba(13,27,20,.62);
+    }
+
+    [data-testid="stImage"] img {
+      border-radius: 15px;
+      border: 1px solid rgba(126,231,135,.16);
+      box-shadow: 0 12px 32px rgba(0,0,0,.2);
+    }
+
+    .stButton > button {
+      min-height: 2.75rem;
+      border: 1px solid rgba(126,231,135,.28);
+      border-radius: 11px;
+      color: #eaffed;
+      background: linear-gradient(
+        135deg,
+        #176b3a,
+        #124d30
+      );
+      font-weight: 700;
+      transition: all .18s ease;
+      box-shadow: 0 7px 20px rgba(10,90,44,.15);
+    }
+
+    .stButton > button:hover {
+      border-color: #7ee787;
+      color: #fff;
+      background: linear-gradient(
+        135deg,
+        #21894b,
+        #17643a
+      );
+      transform: translateY(-1px);
+      box-shadow: 0 10px 25px rgba(34,197,94,.18);
+    }
+
+    .stButton > button:disabled {
+      background: #17251c;
+      color: #718579;
+      border-color: #26372c;
+    }
+
+    [data-testid="stTextInput"] input,
+    [data-testid="stTextArea"] textarea,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+      background: #0b1912;
+      border-color: #294333;
+      border-radius: 10px;
+      color: #eaffed;
+    }
+
+    [data-testid="stFileUploader"] {
+      padding: 12px;
+      border: 1px dashed rgba(126,231,135,.35);
+      border-radius: 15px;
+      background: rgba(16,42,27,.34);
+    }
+
+    [data-testid="stExpander"] {
+      border: 1px solid var(--av-line);
+      border-radius: 13px;
+      background: rgba(13,27,20,.5);
+    }
+
+    [data-testid="stAlert"] {
+      border-radius: 12px;
+    }
+
+    hr {
+      border-color: var(--av-line) !important;
+    }
+
+    .footer {
+      margin-top: 42px;
+      padding: 16px 0 4px;
+      border-top: 1px solid var(--av-line);
+      color: #71877a;
+      text-align: center;
+      font-size: .75rem;
+      letter-spacing: .04em;
+    }
+
+    @media (max-width: 800px) {
+      .hero {
+        padding: 23px 20px;
+      }
+
+      .block-container {
+        padding-left: 1rem;
+        padding-right: 1rem;
+      }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# HERO HEADER
+# ============================================================
+
+st.markdown(
+    """
+    <div class="hero">
+      <div class="hero-badge">ROVER OPS · LIVE</div>
+
+      <div class="title">
+        AgroVision Rover HUD
+      </div>
+
+      <div class="subtitle">
+        INTELLIGENT CROP MONITORING
+        • LIVE VISION
+        • AI-POWERED DIAGNOSTICS
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# API CONFIGURATION
+# ============================================================
+
+API_BASE = "http://127.0.0.1:8001"
+
+PREDICT_URL = f"{API_BASE}/predict"
+ASK_URL = f"{API_BASE}/ask"
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+DEFAULTS = {
+    "esp32_ip": "192.168.1.37",
+    "gps_ip": "192.168.1.50",
+    "live_ai_enabled": False,
+    "live_monitor": None,
+    "live_inference_worker": None,
+    "frozen_frame": None,
+    "api_results": None,
+    "manual_api_results": None,
+    "last_mode": None,
+}
+
+for key, value in DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+# ============================================================
+# IMAGE HELPERS
+# ============================================================
+
+def is_image_array(value):
+    return (
+        isinstance(value, np.ndarray)
+        and value.size > 0
+        and value.ndim in (2, 3)
+    )
+
+
+def decode_data_url(value):
+    """
+    Decode a data:image/...;base64,... string
+    into an OpenCV BGR image.
+    """
+
+    if (
+        not isinstance(value, str)
+        or not value.startswith("data:image")
+    ):
+        return None
+
+    try:
+        encoded = value.split(",", 1)[1]
+        raw = base64.b64decode(encoded)
+
+        return cv2.imdecode(
+            np.frombuffer(raw, np.uint8),
+            cv2.IMREAD_COLOR,
+        )
+
+    except Exception:
+        return None
+
+
+def to_bgr(value):
+    """
+    Accept either an OpenCV ndarray
+    or an API base64 data URL.
+    """
+
+    if is_image_array(value):
+
+        image = value
+
+        if image.ndim == 2:
+            return cv2.cvtColor(
+                image,
+                cv2.COLOR_GRAY2BGR,
+            )
+
+        return image.copy()
+
+    if isinstance(value, str):
+        return decode_data_url(value)
+
+    return None
+
+
+# ============================================================
+# DIGITAL ZOOM
+# ============================================================
+
+def zoom_crop(
+    image,
+    zoom_factor=1.0,
+    detected_objects=None,
+    auto_zoom=False,
+):
+    """
+    Software display zoom.
+
+    If auto zoom is enabled, it attempts to crop around
+    the largest detected plant/leaf bounding box.
+
+    If no bounding box is available, it uses a center crop.
+
+    This does not physically move the camera lens.
+    """
+
+    if not is_image_array(image):
+        return image
+
+    h, w = image.shape[:2]
+
+    factor = float(zoom_factor)
+
+    target_box = None
+
+    if auto_zoom:
+
+        candidates = []
+
+        for obj in (detected_objects or []):
+
+            if not isinstance(obj, dict):
+                continue
+
+            label = str(
+                obj.get("label", "")
+            ).lower()
+
+            bbox = obj.get("bbox")
+
+            if bbox is None or len(bbox) != 4:
+                continue
+
+            if "leaf" in label or "plant" in label:
+
+                try:
+
+                    x1, y1, x2, y2 = [
+                        int(v) for v in bbox
+                    ]
+
+                    area = (
+                        max(0, x2 - x1)
+                        * max(0, y2 - y1)
+                    )
+
+                    if area > 0:
+                        candidates.append(
+                            (
+                                area,
+                                (x1, y1, x2, y2),
+                            )
+                        )
+
+                except (TypeError, ValueError):
+                    continue
+
+        if candidates:
+
+            target_box = max(
+                candidates,
+                key=lambda item: item[0],
+            )[1]
+
+            x1, y1, x2, y2 = target_box
+
+            box_w = x2 - x1
+            box_h = y2 - y1
+
+            crop_w = min(
+                w,
+                max(box_w * 1.7, w / 2.0),
+            ) / max(1.0, factor)
+
+            crop_h = min(
+                h,
+                max(box_h * 1.7, h / 2.0),
+            ) / max(1.0, factor)
+
+            crop_w = max(
+                1,
+                min(w, int(crop_w)),
+            )
+
+            crop_h = max(
+                1,
+                min(h, int(crop_h)),
+            )
+
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+
+            x1 = int(
+                max(
+                    0,
+                    min(w - crop_w, cx - crop_w / 2),
+                )
+            )
+
+            y1 = int(
+                max(
+                    0,
+                    min(h - crop_h, cy - crop_h / 2),
+                )
+            )
+
+            x2 = int(x1 + crop_w)
+            y2 = int(y1 + crop_h)
+
+        else:
+
+            crop_w = max(
+                1,
+                int(w / max(1.0, factor)),
+            )
+
+            crop_h = max(
+                1,
+                int(h / max(1.0, factor)),
+            )
+
+            x1 = (w - crop_w) // 2
+            y1 = (h - crop_h) // 2
+
+            x2 = x1 + crop_w
+            y2 = y1 + crop_h
+
+    elif factor <= 1.001:
+
+        return image
+
+    else:
+
+        crop_w = max(
+            1,
+            int(w / factor),
+        )
+
+        crop_h = max(
+            1,
+            int(h / factor),
+        )
+
+        x1 = (w - crop_w) // 2
+        y1 = (h - crop_h) // 2
+
+        x2 = x1 + crop_w
+        y2 = y1 + crop_h
+
+    crop = image[y1:y2, x1:x2]
+
+    if crop.size == 0:
+        return image
+
+    return cv2.resize(
+        crop,
+        (w, h),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+
+# ============================================================
+# IMAGE DISPLAY
+# ============================================================
+
+def show_cv_image(
+    image,
+    caption=None,
+    key=None,
+    use_container_width=True,
+):
+
+    if not is_image_array(image):
+
+        st.warning(
+            "No valid image is available to display."
+        )
+
+        return
+
+    rgb = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2RGB,
+    )
+
+    st.image(
+        rgb,
+        caption=caption,
+        channels="RGB",
+        use_container_width=use_container_width,
+        output_format="PNG",
+    )
+
+
+# ============================================================
+# CONFIDENCE CONVERSION
+# ============================================================
+
+def confidence_percent(value):
+
+    try:
+
+        number = float(value or 0)
+
+        if 0 <= number <= 1:
+            return round(number * 100, 2)
+
+        return round(number, 2)
+
+    except (TypeError, ValueError):
+
+        return 0.0
+
+
+# ============================================================
+# GPS
+# ============================================================
 
 def get_current_gps():
-    """Fetches the latest fix from the GPS ESP32's /gps endpoint.
-    Returns (lat, lng) or (None, None) if disabled, unreachable, or no
-    fix yet — scans still work without GPS, they just won't be geotagged."""
-    if not config.ENABLE_GPS_TRACKING:
+
+    if not getattr(
+        config,
+        "ENABLE_GPS_TRACKING",
+        False,
+    ):
+
         return None, None
 
-    gps_url = f"http://{st.session_state.gps_ip}/gps"
     try:
-        resp = requests.get(gps_url, timeout=3)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("valid"):
-                return data.get("lat"), data.get("lng")
-    except Exception:
+
+        response = requests.get(
+            f"http://{st.session_state.gps_ip.strip()}/gps",
+            timeout=3,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if data.get("valid"):
+
+            return (
+                data.get("lat"),
+                data.get("lng"),
+            )
+
+    except requests.RequestException:
         pass
+
     return None, None
 
 
-# ==========================================================
-# COMBINED SCAN IMAGE — one large image with the disease label
-# overlay burned in by the backend (labeled_frame), plus a CSS-only
-# scanning-line animation on top. No JS, no iframe — just a <style>
-# keyframe animation, so this can't silently fail to render the way
-# the old JS-driven component could.
-# ==========================================================
-def render_combined_scan_image(res, fallback_display_b64):
-    display_img = res.get("labeled_frame") or res.get("all_objects_frame") or fallback_display_b64
-    if not display_img:
+# ============================================================
+# DETECTION RESULTS
+# ============================================================
+
+def render_detection_list(
+    result,
+    prefix,
+):
+
+    objects = result.get(
+        "detected_objects"
+    ) or []
+
+    if objects:
+
+        with st.expander(
+            f"Detected objects ({len(objects)})",
+            expanded=True,
+        ):
+
+            for index, obj in enumerate(objects):
+
+                label = obj.get(
+                    "label",
+                    "Unknown",
+                )
+
+                score = confidence_percent(
+                    obj.get("confidence", 0)
+                )
+
+                st.write(
+                    f"• {label} — {score:.1f}%"
+                )
+
+    else:
+
+        st.info(
+            "No objects passed the detection thresholds."
+        )
+
+    pest = result.get("pest")
+
+    if pest:
+
+        st.write(
+            f"**Pest classification:** {pest} "
+            f"({confidence_percent(result.get('pest_confidence')):.1f}%)"
+        )
+
+    pest_status = result.get("pest_status")
+
+    if pest_status:
+        st.caption(pest_status)
+
+
+# ============================================================
+# AI ADVISOR
+# ============================================================
+
+def render_ask_box(
+    species,
+    condition,
+    key_prefix,
+):
+
+    st.markdown(
+        "### Ask AgroVision AI Advisor"
+    )
+
+    question = st.text_input(
+        "Ask a question about this diagnosis",
+        key=f"{key_prefix}_question",
+        placeholder=(
+            "Ask about symptoms, prevention or treatment..."
+        ),
+    )
+
+    if st.button(
+        "Ask AI Advisor",
+        key=f"{key_prefix}_ask",
+    ):
+
+        if not question.strip():
+
+            st.warning(
+                "Enter a question first."
+            )
+
+        else:
+
+            with st.spinner(
+                "Contacting AgroVision AI Advisor..."
+            ):
+
+                try:
+
+                    response = requests.post(
+                        ASK_URL,
+                        json={
+                            "species": str(species),
+                            "condition": str(condition),
+                            "question": question.strip(),
+                        },
+                        timeout=90,
+                    )
+
+                    response.raise_for_status()
+
+                    st.session_state[
+                        f"{key_prefix}_answer"
+                    ] = response.json().get(
+                        "answer",
+                        "The advisor returned no answer.",
+                    )
+
+                except requests.RequestException as exc:
+
+                    st.error(
+                        f"Could not contact the AI advisor: {exc}"
+                    )
+
+    answer = st.session_state.get(
+        f"{key_prefix}_answer"
+    )
+
+    if answer:
+        st.info(answer)
+
+
+# ============================================================
+# DIAGNOSIS PANEL
+# ============================================================
+
+def render_diagnosis_panel(
+    result,
+    prefix="diagnosis",
+):
+
+    if not result:
+
+        st.info(
+            "No diagnosis available yet."
+        )
+
         return
 
-    st.markdown(f"""
-    <style>
-    @keyframes scanLineMove {{
-        0%   {{ top: 0%; opacity: 1; }}
-        90%  {{ top: 100%; opacity: 1; }}
-        100% {{ top: 100%; opacity: 0; }}
-    }}
-    @keyframes lockedFadeIn {{
-        0%, 80% {{ opacity: 0; transform: translateY(-6px); }}
-        100%    {{ opacity: 1; transform: translateY(0); }}
-    }}
-    .scan-wrap {{
-        position: relative;
-        width: 100%;
-        border-radius: 16px;
-        overflow: hidden;
-        border: 1px solid #22C55E;
-        box-shadow: 0 0 24px rgba(34,197,94,0.15);
-    }}
-    .scan-wrap img {{
-        width: 100%;
-        display: block;
-    }}
-    .scan-line {{
-        position: absolute;
-        left: 0;
-        width: 100%;
-        height: 3px;
-        background: #00FF88;
-        box-shadow: 0 0 16px 3px #00FF88;
-        animation: scanLineMove 1.8s ease-in-out 1 forwards;
-    }}
-    .locked-badge {{
-        position: absolute;
-        top: 10px;
-        left: 10px;
-        background: rgba(34, 197, 94, 0.15);
-        border: 1px solid #4ADE80;
-        color: #4ADE80;
-        padding: 5px 12px;
-        border-radius: 100px;
-        font-size: 11px;
-        font-family: 'JetBrains Mono', monospace;
-        letter-spacing: 1px;
-        opacity: 0;
-        animation: lockedFadeIn 2.2s ease forwards;
-    }}
-    </style>
-    <div class="scan-wrap">
-        <img src="{display_img}" />
-        <div class="scan-line"></div>
-        <div class="locked-badge">✓ TARGET LOCKED</div>
-    </div>
-    """, unsafe_allow_html=True)
+    species = result.get(
+        "species",
+        "Unknown",
+    )
 
+    condition = (
+        result.get("condition")
+        or result.get("disease", "Unknown")
+    )
 
-# ==========================================================
-# DIAGNOSIS RESULT PANEL — pure native Streamlit widgets.
-# No HTML/JS component, no iframe — this cannot silently fail to
-# render the way the old components.html() cinematic version could.
-# Slightly less flashy, but guaranteed to show every field every time.
-# ==========================================================
-def render_diagnosis_panel(res, fallback_display_b64, show_image=True):
-    if not res:
-        st.info("No scan results yet.")
-        return
+    confidence = confidence_percent(
+        result.get("confidence", 0)
+    )
 
-    species = res.get("species", "Unknown")
-    condition = res.get("condition", res.get("disease", "Unknown"))
-    confidence = res.get("confidence", 0) or 0
-    severity = res.get("severity", "N/A")
-    treatment = res.get("treatment", "No issues found.")
-    recommendations = res.get("recommendations", []) or []
-    detected_objects = res.get("detected_objects", []) or []
+    severity = result.get(
+        "severity",
+        "N/A",
+    )
 
-    found = confidence and confidence > 0
-    status_label = "🟢 TARGET DETECTED" if found else "🟡 NO OBJECT LOCKED"
-    st.markdown(f"**{status_label}**")
+    recommendations = (
+        result.get("recommendations")
+        or []
+    )
 
-    if show_image:
-        display_img = res.get("labeled_frame") or res.get("all_objects_frame") or fallback_display_b64
-        if display_img:
-            st.image(display_img, use_container_width=True)
+    treatment = result.get(
+        "treatment",
+        "No recommended action returned.",
+    )
 
-    # Detected objects ticker
-    if detected_objects:
-        with st.expander(f"Objects detected ({len(detected_objects)})", expanded=False):
-            for obj in detected_objects:
-                st.write(f"▸ {obj.get('label', 'unknown')} — {obj.get('confidence', 0)}%")
+    st.markdown(
+        "### 🔍 Diagnostics Evaluation"
+    )
 
-    st.markdown("---")
+    if (
+        confidence > 0
+        and condition not in (
+            "Unrecognized / Low Confidence",
+            "Invalid Image",
+            "No Target Object Spotted",
+        )
+    ):
+
+        st.success(
+            "TARGET DETECTED"
+        )
+
+    else:
+
+        st.warning(
+            "NO CONFIDENT TARGET DIAGNOSIS"
+        )
 
     c1, c2 = st.columns(2)
-    with c1:
-        st.metric("Species", species)
-        st.metric("Confidence", f"{confidence}%")
-    with c2:
-        st.metric("Condition", condition)
-        st.metric("Severity", severity)
 
-    st.markdown("**Recommendations**")
+    c1.metric(
+        "Species",
+        species,
+    )
+
+    c2.metric(
+        "Condition",
+        condition,
+    )
+
+    c3, c4 = st.columns(2)
+
+    c3.metric(
+        "Confidence",
+        f"{confidence:.2f}%",
+    )
+
+    c4.metric(
+        "Severity",
+        severity,
+    )
+
+    render_detection_list(
+        result,
+        prefix,
+    )
+
+    if result.get("leaf_count") is not None:
+
+        st.metric(
+            "Detected leaves",
+            result.get("leaf_count", 0),
+        )
+
+    st.markdown(
+        "**Recommendations**"
+    )
+
     if recommendations:
-        for r in recommendations:
-            st.write(f"• {r}")
-    else:
-        st.write("No specific recommendations.")
 
-    st.markdown("**Recommended Action**")
+        for item in recommendations:
+            st.write(f"• {item}")
+
+    else:
+
+        st.write(
+            "No specific recommendations available."
+        )
+
+    st.markdown(
+        "**Recommended action**"
+    )
+
     st.write(treatment)
 
-
-def render_ask_box(species, condition, key_prefix):
-    """A simple follow-up Q&A box under a diagnosis — calls /ask."""
-    st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
-    question = st.text_input(
-        "Ask a follow-up question about this diagnosis",
-        key=f"{key_prefix}_question",
-        placeholder="e.g. Where can I buy copper fungicide near me?"
+    render_ask_box(
+        species,
+        condition,
+        prefix,
     )
-    if st.button("Ask", key=f"{key_prefix}_ask_btn"):
-        if question.strip():
-            with st.spinner("Consulting AI advisor..."):
-                try:
-                    resp = requests.post(
-                        ASK_URL,
-                        json={"species": species, "condition": condition, "question": question},
-                        timeout=90
-                    )
-                    if resp.status_code == 200:
-                        st.session_state[f"{key_prefix}_answer"] = resp.json().get("answer", "No answer returned.")
-                    else:
-                        st.error(f"API returned status {resp.status_code}")
-                except Exception as e:
-                    st.error(f"Could not reach AI advisor: {e}")
-
-    if st.session_state.get(f"{key_prefix}_answer"):
-        st.markdown(f"""
-        <div class='card' style="margin-top:10px;">
-            <div style="font-size:11px; letter-spacing:1px; color:#64748B; margin-bottom:6px;">AI ADVISOR</div>
-            <div style="font-size:14px; color:#E2E8F0; line-height:1.6;">{st.session_state[f'{key_prefix}_answer']}</div>
-        </div>
-        """, unsafe_allow_html=True)
 
 
-# ==========================================
+# ============================================================
+# LIVE AI DISPLAY
+# ============================================================
+
+@st.fragment(run_every=1.0)
+def render_live_ai_feed():
+
+    worker = st.session_state.get(
+        "live_inference_worker"
+    )
+
+    monitor = st.session_state.get(
+        "live_monitor"
+    )
+
+    if not st.session_state.get(
+        "live_ai_enabled"
+    ):
+
+        st.info(
+            "Live AI is stopped."
+        )
+
+        return
+
+    if worker is None or monitor is None:
+
+        st.warning(
+            "Live AI services are not initialized."
+        )
+
+        return
+
+    camera_status = (
+        monitor.get_status() or {}
+    )
+
+    worker_status = (
+        worker.get_status() or {}
+    )
+
+    if camera_status.get("error"):
+
+        st.error(
+            f"Camera error: {camera_status['error']}"
+        )
+
+    if worker_status.get("error"):
+
+        st.error(
+            f"Inference error: {worker_status['error']}"
+        )
+
+    st.caption(
+        "Camera frames received: "
+        f"{camera_status.get('frames_received', 0)}"
+    )
+
+    result = worker.get_latest_result()
+
+    if result is None:
+
+        st.info(
+            "Waiting for the first AI inference result..."
+        )
+
+        return
+
+    bbox_image = result.get(
+        "bounding_box_image"
+    )
+
+    all_objects_image = result.get(
+        "all_objects_frame"
+    )
+
+    labeled_image = result.get(
+        "labeled_frame"
+    )
+
+    display_image = None
+
+    for candidate in (
+        bbox_image,
+        all_objects_image,
+        labeled_image,
+    ):
+
+        if is_image_array(candidate):
+
+            display_image = candidate
+            break
+
+    detected_objects = (
+        result.get("detected_objects")
+        or []
+    )
+
+    st.markdown(
+        "### 🧠 Live AI Analysis"
+    )
+
+    auto_zoom = st.checkbox(
+        "Automatic plant/leaf zoom",
+        value=True,
+        key="live_auto_zoom",
+        help=(
+            "Zooms the displayed image around the largest "
+            "detected plant/leaf box when bbox coordinates "
+            "are available."
+        ),
+    )
+
+    manual_zoom = st.slider(
+        "Display zoom",
+        min_value=1.0,
+        max_value=3.0,
+        value=1.0,
+        step=0.1,
+        key="live_zoom_level",
+        help=(
+            "Manual digital zoom of the displayed frame. "
+            "1.0x is the original view."
+        ),
+    )
+
+    if display_image is not None:
+
+        if auto_zoom:
+
+            zoomed = zoom_crop(
+                display_image,
+                zoom_factor=manual_zoom,
+                detected_objects=detected_objects,
+                auto_zoom=True,
+            )
+
+        else:
+
+            zoomed = zoom_crop(
+                display_image,
+                zoom_factor=manual_zoom,
+            )
+
+        show_cv_image(
+            zoomed,
+            caption="Live AI annotated frame",
+        )
+
+    else:
+
+        st.warning(
+            "AI returned no annotated image for this frame."
+        )
+
+    render_detection_list(
+        result,
+        "live",
+    )
+
+    st.write(
+        f"**Plant locked:** {result.get('plant_locked', False)}"
+    )
+
+    st.write(
+        f"**Disease result:** {result.get('disease', 'Pending')}"
+    )
+
+    st.write(
+        f"**Species:** {result.get('species', 'Unknown')}"
+    )
+
+    st.write(
+        "**Disease confidence:** "
+        f"{confidence_percent(result.get('confidence', 0)):.2f}%"
+    )
+
+    if result.get("green_ratio") is not None:
+
+        st.write(
+            "**Vegetation ratio:** "
+            f"{float(result['green_ratio']):.1%}"
+        )
+
+
+# ============================================================
 # SIDEBAR NAVIGATION
-# ==========================================
-st.sidebar.markdown("<h2 class='sidebar-title'>🛰️ Navigation Panel</h2>", unsafe_allow_html=True)
-mode = st.sidebar.radio("Select Rover Input Mode", ["ESP32 Live Camera", "Upload Image Asset"], label_visibility="collapsed")
+# ============================================================
 
-st.sidebar.markdown("<hr class='sidebar-divider'>", unsafe_allow_html=True)
-st.sidebar.markdown("<div class='sidebar-label'>ESP32-CAM IP ADDRESS</div>", unsafe_allow_html=True)
-st.session_state.esp32_ip = st.sidebar.text_input(
-    "ESP32 IP",
-    value=st.session_state.esp32_ip,
-    label_visibility="collapsed",
-    help="Just the IP printed in the Arduino Serial Monitor, e.g. 10.201.79.249 (no http://, no port)."
+st.sidebar.markdown(
+    "<h2 class='sidebar-title'>🛰️ Navigation Panel</h2>",
+    unsafe_allow_html=True,
 )
 
-ESP32_BASE = f"http://{st.session_state.esp32_ip}"
+mode = st.sidebar.radio(
+    "Select Rover Input Mode",
+    [
+        "ESP32 Live Camera",
+        "Upload Image Asset",
+    ],
+    label_visibility="collapsed",
+)
+
+st.sidebar.markdown(
+    "<hr class='sidebar-divider'>",
+    unsafe_allow_html=True,
+)
+
+st.sidebar.markdown(
+    "### ESP32-CAM IP ADDRESS"
+)
+
+st.session_state.esp32_ip = st.sidebar.text_input(
+    "Camera IP",
+    value=st.session_state.esp32_ip,
+    key="esp32_ip_input",
+    help=(
+        "Enter the IP printed in Arduino Serial Monitor. "
+        "Example: 192.168.1.37"
+    ),
+)
+
+camera_ip = (
+    st.session_state.esp32_ip.strip()
+    .replace("http://", "")
+    .replace("https://", "")
+    .rstrip("/")
+)
+
+ESP32_BASE = f"http://{camera_ip}"
+
 STREAM_URL = f"{ESP32_BASE}:81/stream"
+
 CAPTURE_URL = f"{ESP32_BASE}/capture"
 
-st.sidebar.markdown(f"""
-<div class="sidebar-info">
-    <div><b>Stream:</b> {STREAM_URL}</div>
-    <div><b>Snapshot:</b> {CAPTURE_URL}</div>
-</div>
-""", unsafe_allow_html=True)
+st.sidebar.markdown(
+    f"""
+    <div class="sidebar-info">
+      <div>
+        <b>Stream:</b>
+        {html.escape(STREAM_URL)}
+      </div>
 
-if config.ENABLE_GPS_TRACKING:
-    st.sidebar.markdown("<div class='sidebar-label' style='margin-top:14px;'>GPS MODULE IP ADDRESS</div>", unsafe_allow_html=True)
+      <div>
+        <b>Snapshot:</b>
+        {html.escape(CAPTURE_URL)}
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if getattr(
+    config,
+    "ENABLE_GPS_TRACKING",
+    False,
+):
+
+    st.sidebar.markdown(
+        "### GPS MODULE IP ADDRESS"
+    )
+
     st.session_state.gps_ip = st.sidebar.text_input(
         "GPS IP",
         value=st.session_state.gps_ip,
-        label_visibility="collapsed",
-        help="IP printed by the GPS ESP32's Serial Monitor (the one running gps_server.ino)."
+        key="gps_ip_input",
     )
 
-if "last_mode" not in st.session_state or st.session_state.last_mode != mode:
+
+# ============================================================
+# MODE CHANGE RESET
+# ============================================================
+
+if st.session_state.last_mode != mode:
+
     st.session_state.frozen_frame = None
+
     st.session_state.api_results = None
+
+    st.session_state.manual_api_results = None
+
     st.session_state.last_mode = mode
 
-# ==========================================
-# INTERFACE EXECUTION LOGIC
-# ==========================================
+
+# ============================================================
+# ESP32 LIVE CAMERA MODE
+# ============================================================
 
 if mode == "ESP32 Live Camera":
-    col1, col2 = st.columns([5, 4])
 
-    with col1:
-        st.markdown("<h3>🛰️ Rover Main Track View</h3>", unsafe_allow_html=True)
-        frame_placeholder = st.empty()
-        control_placeholder = st.empty()
+    st.markdown(
+        "## 🛰️ Rover Main Track View"
+    )
 
-    with col2:
-        st.markdown("<h3>🔍 Target Diagnosis Engine</h3>", unsafe_allow_html=True)
-        result_placeholder = st.container()
+    # --------------------------------------------------------
+    # CAMERA DISPLAY
+    # --------------------------------------------------------
+
+    if st.session_state.frozen_frame is None:
+
+        st.markdown(
+            f"""
+            <div class="camera-box">
+              <img
+                src="{html.escape(STREAM_URL)}"
+                style="width:100%; border-radius:12px;"
+                onerror="this.style.opacity=0.3;"
+              />
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    else:
+
+        frozen = st.session_state.frozen_frame
+
+        zoom = st.slider(
+            "Snapshot display zoom",
+            min_value=1.0,
+            max_value=3.0,
+            value=1.0,
+            step=0.1,
+            key="snapshot_zoom",
+        )
+
+        show_cv_image(
+            zoom_crop(frozen, zoom),
+            caption="Locked target snapshot",
+        )
+
+    # --------------------------------------------------------
+    # CONTROL BUTTONS
+    # --------------------------------------------------------
+
+    start_col, stop_col, snap_col = st.columns(3)
+
+    with start_col:
+
+        start_clicked = st.button(
+            "▶ Start Live AI",
+            use_container_width=True,
+            disabled=st.session_state.live_ai_enabled,
+        )
+
+    with stop_col:
+
+        stop_clicked = st.button(
+            "⏹ Stop Live AI",
+            use_container_width=True,
+            disabled=not st.session_state.live_ai_enabled,
+        )
+
+    with snap_col:
+
+        snapshot_clicked = st.button(
+            "📸 Lock Target & Scan",
+            use_container_width=True,
+            disabled=(
+                st.session_state.frozen_frame is not None
+            ),
+        )
+
+    # --------------------------------------------------------
+    # START LIVE AI
+    # --------------------------------------------------------
+
+    if start_clicked:
+
+        try:
+
+            monitor = LiveMonitor(
+                camera_ip=camera_ip
+            )
+
+            worker = LiveInferenceWorker(
+                monitor
+            )
+
+            st.session_state.live_monitor = monitor
+
+            st.session_state.live_inference_worker = worker
+
+            monitor.start()
+
+            worker.start()
+
+            st.session_state.live_ai_enabled = True
+
+            st.success(
+                "Live AI started."
+            )
+
+            st.rerun()
+
+        except Exception as exc:
+
+            st.session_state.live_ai_enabled = False
+
+            st.session_state.live_monitor = None
+
+            st.session_state.live_inference_worker = None
+
+            st.error(
+                f"Could not start Live AI: {exc}"
+            )
+
+    # --------------------------------------------------------
+    # STOP LIVE AI
+    # --------------------------------------------------------
+
+    if stop_clicked:
+
+        try:
+
+            worker = st.session_state.live_inference_worker
+
+            monitor = st.session_state.live_monitor
+
+            if worker is not None:
+                worker.stop()
+
+            if monitor is not None:
+                monitor.stop()
+
+        except Exception as exc:
+
+            st.warning(
+                f"Shutdown warning: {exc}"
+            )
+
+        st.session_state.live_inference_worker = None
+
+        st.session_state.live_monitor = None
+
+        st.session_state.live_ai_enabled = False
+
+        st.success(
+            "Live AI stopped."
+        )
+
+        st.rerun()
+
+    # --------------------------------------------------------
+    # LIVE AI FEED
+    # --------------------------------------------------------
+
+    if st.session_state.live_ai_enabled:
+
+        st.divider()
+
+        render_live_ai_feed()
+
+    # --------------------------------------------------------
+    # SNAPSHOT AND ANALYSIS
+    # --------------------------------------------------------
+
+    if snapshot_clicked:
+
+        with st.spinner(
+            "Capturing a snapshot from ESP32-CAM..."
+        ):
+
+            try:
+
+                snap_response = requests.get(
+                    CAPTURE_URL,
+                    timeout=15,
+                )
+
+                snap_response.raise_for_status()
+
+                image_bytes = np.frombuffer(
+                    snap_response.content,
+                    dtype=np.uint8,
+                )
+
+                frame = cv2.imdecode(
+                    image_bytes,
+                    cv2.IMREAD_COLOR,
+                )
+
+                if frame is None:
+
+                    st.error(
+                        "ESP32 returned an invalid image."
+                    )
+
+                else:
+
+                    lat, lng = get_current_gps()
+
+                    ok, encoded = cv2.imencode(
+                        ".jpg",
+                        frame,
+                    )
+
+                    if not ok:
+
+                        st.error(
+                            "Could not encode the camera snapshot."
+                        )
+
+                    else:
+
+                        form_data = {}
+
+                        if (
+                            lat is not None
+                            and lng is not None
+                        ):
+
+                            form_data = {
+                                "latitude": str(lat),
+                                "longitude": str(lng),
+                            }
+
+                        files = {
+                            "file": (
+                                "rover_snapshot.jpg",
+                                encoded.tobytes(),
+                                "image/jpeg",
+                            )
+                        }
+
+                        with st.spinner(
+                            "Running plant and disease diagnostics..."
+                        ):
+
+                            response = requests.post(
+                                PREDICT_URL,
+                                files=files,
+                                data=form_data,
+                                timeout=120,
+                            )
+
+                            response.raise_for_status()
+
+                            st.session_state.api_results = (
+                                response.json()
+                            )
+
+                            st.session_state.frozen_frame = frame
+
+                            st.rerun()
+
+            except requests.RequestException as exc:
+
+                st.error(
+                    f"Camera/API request failed: {exc}"
+                )
+
+            except Exception as exc:
+
+                st.error(
+                    f"Snapshot processing failed: {exc}"
+                )
+
+    # --------------------------------------------------------
+    # SNAPSHOT RESULTS
+    # --------------------------------------------------------
 
     if st.session_state.frozen_frame is not None:
-        b64_display = get_image_base64(st.session_state.frozen_frame)
 
-        if control_placeholder.button("🔄 Resume Stream Tracking", use_container_width=True):
+        if st.button(
+            "🔄 Resume Live Camera Stream",
+            use_container_width=True,
+        ):
+
             st.session_state.frozen_frame = None
+
             st.session_state.api_results = None
+
             st.rerun()
 
         if st.session_state.api_results:
-            with col1:
-                render_combined_scan_image(st.session_state.api_results, b64_display)
-            with result_placeholder:
-                render_diagnosis_panel(st.session_state.api_results, b64_display, show_image=False)
-                render_ask_box(
-                    st.session_state.api_results.get("species", "Unknown"),
-                    st.session_state.api_results.get("condition", "Unknown"),
-                    key_prefix="esp32"
+
+            result = st.session_state.api_results
+
+            st.divider()
+
+            left, right = st.columns([5, 4])
+
+            with left:
+
+                st.markdown(
+                    "### 🎯 AI Detection Results"
                 )
-        else:
-            frame_placeholder.markdown(f"""
-                <div class="camera-box"><img src="{b64_display}" style="width:100%; border-radius:12px;" /></div>
-            """, unsafe_allow_html=True)
 
-    else:
-        frame_placeholder.markdown(f"""
-            <div class="camera-box">
-                <img src="{STREAM_URL}" style="width:100%;" onerror="this.style.opacity=0.3;" />
-            </div>
-        """, unsafe_allow_html=True)
+                annotated = (
+                    result.get("bounding_box_image")
+                    or result.get("all_objects_frame")
+                    or result.get("labeled_frame")
+                )
 
-        if control_placeholder.button("📸 Lock Target & Scan Asset 🌿", use_container_width=True):
-            with st.spinner("Grabbing snapshot from rover camera..."):
-                try:
-                    snap_resp = requests.get(CAPTURE_URL, timeout=5)
-                except Exception as e:
-                    st.error(f"Could not reach ESP32 at {CAPTURE_URL}: {e}")
-                    snap_resp = None
+                decoded = (
+                    decode_data_url(annotated)
+                    if isinstance(annotated, str)
+                    else None
+                )
 
-            if snap_resp is not None and snap_resp.status_code == 200:
-                img_array = np.frombuffer(snap_resp.content, np.uint8)
-                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                if decoded is not None:
 
-                if frame is None:
-                    st.error("Snapshot came back corrupted — try scanning again.")
+                    zoom = st.slider(
+                        "Annotated image zoom",
+                        1.0,
+                        3.0,
+                        1.0,
+                        0.1,
+                        key="snapshot_annotated_zoom",
+                    )
+
+                    show_cv_image(
+                        zoom_crop(decoded, zoom)
+                    )
+
                 else:
-                    with st.spinner("Executing Object Lock-on & MobileNet Diagnostics..."):
-                        try:
-                            lat, lng = get_current_gps()
-                            _, encoded_img = cv2.imencode('.jpg', frame)
-                            files = {"file": ("rover_snapshot.jpg", encoded_img.tobytes(), "image/jpeg")}
-                            form_data = {}
-                            if lat is not None:
-                                form_data["latitude"] = str(lat)
-                                form_data["longitude"] = str(lng)
-                            response = requests.post(FASTAPI_URL, files=files, data=form_data, timeout=90)
 
-                            if response.status_code == 200:
-                                st.session_state.api_results = response.json()
-                                st.session_state.frozen_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                                st.rerun()
-                            else:
-                                st.error(f"API returned status {response.status_code}: {response.text[:200]}")
-                        except Exception as e:
-                            st.error(f"Rover connection protocol interrupted: {e}")
-            elif snap_resp is not None:
-                st.error(f"ESP32 snapshot endpoint returned status {snap_resp.status_code}.")
+                    st.info(
+                        "The API did not return an annotated image."
+                    )
+
+            with right:
+
+                render_diagnosis_panel(
+                    result,
+                    "snapshot",
+                )
+
+
+# ============================================================
+# MANUAL IMAGE UPLOAD MODE
+# ============================================================
 
 elif mode == "Upload Image Asset":
-    st.subheader("📤 Manual Target Image Upload")
-    uploaded_file = st.file_uploader("Upload farm asset file...", type=["jpg", "jpeg", "png"])
+
+    st.markdown(
+        "## 📤 Manual Target Image Upload"
+    )
+
+    uploaded_file = st.file_uploader(
+        "Upload a plant/leaf/pest image",
+        type=[
+            "jpg",
+            "jpeg",
+            "png",
+        ],
+        key="manual_upload",
+    )
 
     if uploaded_file is not None:
-        col1, col2 = st.columns([5, 4])
+
         file_bytes = uploaded_file.getvalue()
-        opencv_img = cv2.imdecode(np.frombuffer(file_bytes, np.uint8), cv2.IMREAD_COLOR)
 
-        if opencv_img is None:
-            st.error("This file couldn't be read as an image. Please upload a valid JPG/PNG.")
+        frame = cv2.imdecode(
+            np.frombuffer(
+                file_bytes,
+                np.uint8,
+            ),
+            cv2.IMREAD_COLOR,
+        )
+
+        if frame is None:
+
+            st.error(
+                "This file is not a valid JPG/PNG image."
+            )
+
         else:
-            rgb_img = cv2.cvtColor(opencv_img, cv2.COLOR_BGR2RGB)
-            b64_display = get_image_base64(rgb_img)
 
-            with col1:
-                st.markdown("<h3>🎯 Uploaded Target Asset</h3>", unsafe_allow_html=True)
-                if st.session_state.manual_api_results:
-                    render_combined_scan_image(st.session_state.manual_api_results, b64_display)
-                else:
-                    st.markdown(f"""
-                        <div class="camera-box"><img src="{b64_display}" style="width:100%;" /></div>
-                    """, unsafe_allow_html=True)
+            left, right = st.columns([5, 4])
 
-                if st.button("Run Manual Asset Diagnostics", use_container_width=True):
-                    files = {"file": (uploaded_file.name, file_bytes, uploaded_file.type)}
-                    with st.spinner("Analyzing manual entry asset..."):
+            with left:
+
+                st.markdown(
+                    "### 🎯 Uploaded Target Asset"
+                )
+
+                show_cv_image(
+                    frame,
+                    caption="Original uploaded image",
+                )
+
+                if st.button(
+                    "Run Manual Asset Diagnostics",
+                    use_container_width=True,
+                    key="run_manual_diagnostics",
+                ):
+
+                    with st.spinner(
+                        "Analyzing uploaded image..."
+                    ):
+
                         try:
-                            response = requests.post(FASTAPI_URL, files=files, timeout=90)
-                            if response.status_code == 200:
-                                st.session_state.manual_api_results = response.json()
-                                st.rerun()
-                            else:
-                                st.error(f"API returned status {response.status_code}: {response.text[:200]}")
-                        except Exception as e:
-                            st.error(f"Could not connect to analysis pipeline: {e}")
 
-            with col2:
-                st.markdown("<h3>🔍 Diagnostics Evaluation</h3>", unsafe_allow_html=True)
-                if st.session_state.manual_api_results:
-                    render_diagnosis_panel(st.session_state.manual_api_results, b64_display, show_image=False)
-                    render_ask_box(
-                        st.session_state.manual_api_results.get("species", "Unknown"),
-                        st.session_state.manual_api_results.get("condition", "Unknown"),
-                        key_prefix="manual"
+                            response = requests.post(
+                                PREDICT_URL,
+                                files={
+                                    "file": (
+                                        uploaded_file.name,
+                                        file_bytes,
+                                        uploaded_file.type
+                                        or "image/jpeg",
+                                    )
+                                },
+                                timeout=120,
+                            )
+
+                            response.raise_for_status()
+
+                            st.session_state.manual_api_results = (
+                                response.json()
+                            )
+
+                            st.rerun()
+
+                        except requests.RequestException as exc:
+
+                            st.error(
+                                f"Could not connect to analysis API: {exc}"
+                            )
+
+            with right:
+
+                result = st.session_state.manual_api_results
+
+                if result:
+
+                    st.markdown(
+                        "### 🧠 AI Detection — Bounding Boxes"
                     )
-                else:
-                    st.info("Click 'Run Manual Asset Diagnostics' to start the scan sequence.")
 
-st.markdown("<div class='footer'>AgroVision AI Operations HUD v3.0 • Running on Autonomous Farm Rover Hardware</div>", unsafe_allow_html=True)
+                    annotated_value = (
+                        result.get("bounding_box_image")
+                        or result.get("all_objects_frame")
+                        or result.get("labeled_frame")
+                    )
+
+                    annotated = (
+                        decode_data_url(annotated_value)
+                        if isinstance(annotated_value, str)
+                        else None
+                    )
+
+                    if annotated is not None:
+
+                        zoom = st.slider(
+                            "Annotated image zoom",
+                            min_value=1.0,
+                            max_value=3.0,
+                            value=1.0,
+                            step=0.1,
+                            key="manual_annotated_zoom",
+                        )
+
+                        show_cv_image(
+                            zoom_crop(annotated, zoom)
+                        )
+
+                    render_diagnosis_panel(
+                        result,
+                        "manual",
+                    )
+
+                else:
+
+                    st.info(
+                        "Upload an image, then click "
+                        "Run Manual Asset Diagnostics."
+                    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.markdown(
+    """
+    <div class='footer'>
+      AgroVision AI Operations HUD v3.0
+      • Autonomous Farm Rover
+    </div>
+    """,
+    unsafe_allow_html=True,
+)

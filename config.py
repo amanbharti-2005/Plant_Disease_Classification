@@ -1,69 +1,176 @@
-"""
-Single source of truth for every tunable setting in the pipeline.
-
-The whole point of this file: when you want to change a threshold, swap
-a model file, or turn a feature on/off, you edit ONE line here — you
-never touch predict.py / api.py, and you never need to retrain anything
-just to change how confident YOLO needs to be, for example.
-
-Everything downstream (predict.py, api.py, database.py) imports from
-here instead of hardcoding values.
-"""
 import os
+from dotenv import load_dotenv
+
+# ==========================================================
+# ENVIRONMENT
+# ==========================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ============================================================
-# VISION MODELS
-# ============================================================
-DISEASE_MODEL_PATH = os.path.join(BASE_DIR, "models", "plant_disease_model.keras")
+load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
-# General object detector — COCO-pretrained, ships with ultralytics.
-# This is what powers the "here's everything I see" ticker.
-YOLO_GENERAL_MODEL_PATH = "yolov8n.pt"
 
-# Weed detector — a SEPARATE custom-trained YOLO model (not built yet).
-# Once you train one in Colab (see WEED_TRAINING_NOTES.md), drop the
-# .pt file at this path and weed detection turns on automatically —
-# no code changes needed anywhere else in the project.
-WEED_MODEL_PATH = os.path.join(BASE_DIR, "models", "weed_detector.pt")
-ENABLE_WEED_DETECTION = os.path.exists(WEED_MODEL_PATH)
+# ==========================================================
+# MODEL PATHS
+# ==========================================================
 
-# ============================================================
-# DETECTION THRESHOLDS — tune these freely, no retraining needed
-# ============================================================
-PLANT_CLASS_ID = 58              # COCO class id for "potted plant"
-PLANT_MIN_CONFIDENCE = 0.40      # how sure YOLO must be to lock a plant target
-GENERAL_MIN_CONFIDENCE = 0.35    # floor for the "all objects" ticker
-WEED_MIN_CONFIDENCE = 0.35       # floor for weed detections (once weed model exists)
-GREEN_RATIO_MIN = 0.12   # 12% se kam green pixels = "plant nahi hai" maan lo
+MODELS_DIR = os.path.join(BASE_DIR, "models")
 
-# Disease classifier confidence floor — used by predict.py's confidence
-# gate. Below this, the top prediction is NOT reported as a diagnosis;
-# it's flagged as "Unrecognized / Low Confidence" instead (and skipped
-# in the database / diagnosis pipeline via api.py's NO_RESULT_STATUSES).
-# Raise this if you're still seeing too many wrong/forced guesses;
-# lower it if too many legitimate scans are getting flagged as uncertain.
+DISEASE_MODEL_PATH = os.path.join(
+    MODELS_DIR,
+    "plant_disease_model.keras"
+)
+
+YOLO_GENERAL_MODEL_PATH = os.path.join(
+    BASE_DIR,
+    "yolov8n.pt"
+)
+
+LEAF_MODEL_PATH = os.path.join(
+    MODELS_DIR,
+    "leaf_detector_best.pt"
+)
+
+PEST_MODEL_PATH = os.path.join(
+    MODELS_DIR,
+    "ip102_pest_classifier_best.keras"
+)
+
+PEST_CLASS_NAMES_PATH = os.path.join(
+    MODELS_DIR,
+    "pest_class_names.json"
+)
+
+
+# ==========================================================
+# MODEL AVAILABILITY
+# ==========================================================
+
+ENABLE_LEAF_DETECTION = os.path.exists(LEAF_MODEL_PATH)
+
+ENABLE_PEST_CLASSIFICATION = os.path.exists(PEST_MODEL_PATH)
+
+
+# ==========================================================
+# YOLO DETECTION SETTINGS
+# ==========================================================
+
+PLANT_CLASS_ID = 58
+
+PLANT_MIN_CONFIDENCE = 0.40
+
+GENERAL_MIN_CONFIDENCE = 0.35
+
+
+# ==========================================================
+# DISEASE CLASSIFICATION SETTINGS
+# ==========================================================
+
 DISEASE_MIN_CONFIDENCE = 0.55
 
-# ============================================================
-# GPS TRACKING
-# ============================================================
-# Flip to True once the GPS ESP32 is back on the same network as this
-# app. While False, the sidebar hides the GPS IP box entirely and scans
-# skip trying to reach it — no 3-second network timeout on every scan,
-# no dead UI element pointing at hardware that isn't reachable.
+GREEN_RATIO_MIN = 0.12
+
+
+# ==========================================================
+# PEST CLASSIFICATION SETTINGS
+# ==========================================================
+
+PEST_MIN_CONFIDENCE = 0.50
+
+
+# ==========================================================
+# TEMPORARY FILES
+# ==========================================================
+
+TEMP_DIR = os.path.join(BASE_DIR, "temp")
+
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+
+# ==========================================================
+# DATABASE
+# ==========================================================
+
+DATABASE_PATH = os.path.join(
+    BASE_DIR,
+    "agrovision.db"
+)
+
+
+# ==========================================================
+# GROQ AI CONFIGURATION
+# ==========================================================
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+GROQ_MODEL = os.getenv(
+    "GROQ_MODEL",
+    "openai/gpt-oss-120b"
+)
+
+
+# ==========================================================
+# FASTAPI
+# ==========================================================
+
+API_HOST = "127.0.0.1"
+
+API_PORT = 8001
+
+
+# ==========================================================
+# ESP32-CAM CONFIGURATION
+# ==========================================================
+
+ESP32_CAM_IP = "192.168.1.37"
+
+ESP32_STREAM_URL = f"http://{ESP32_CAM_IP}:81/stream"
+
+ESP32_CAPTURE_URL = f"http://{ESP32_CAM_IP}/capture"
+
+
+# ==========================================================
+# GPS CONFIGURATION
+# ==========================================================
+
 ENABLE_GPS_TRACKING = False
 
-# ============================================================
-# DATABASE
-# ============================================================
-DB_PATH = os.path.join(BASE_DIR, "agrovision.db")
+GPS_DEFAULT_IP = "192.168.1.50"
 
-# ============================================================
-# LLM (Groq)
-# ============================================================
-# Switched from Gemini to Groq. Set the GROQ_API_KEY environment
-# variable — get a free key at https://console.groq.com/keys
-GROQ_MODEL = "llama-3.3-70b-versatile"
-GROQ_API_KEY_ENV_VAR = "GROQ_API_KEY"
+
+# ==========================================================
+# LIVE MONITORING
+# ==========================================================
+
+ENABLE_LIVE_MONITORING = True
+
+ENABLE_LIVE_INFERENCE = True
+
+INFERENCE_INTERVAL_SECONDS = 1.0
+
+NEGATIVE_OBSERVATION_INTERVAL_SECONDS = 30
+
+EVENT_COOLDOWN_SECONDS = 30
+
+
+# ==========================================================
+# IMAGE PROCESSING
+# ==========================================================
+
+ENABLE_DIGITAL_ZOOM = True
+
+DIGITAL_ZOOM_FACTOR = 1.5
+
+
+# ==========================================================
+# SUPABASE IMAGE STORAGE
+# ==========================================================
+
+ENABLE_SUPABASE_PERSISTENCE = True
+
+SUPABASE_BUCKET_NAME = "disease-detection-images"
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+DB_PATH = os.path.join(BASE_DIR, "agrovision.db")

@@ -1,9 +1,11 @@
+
 from fastapi import FastAPI, UploadFile, File, Request, Form
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
+from pathlib import Path
 import shutil
 import os
 import cv2
@@ -14,10 +16,15 @@ from utils.class_names import CLASS_NAMES
 from utils.llm_engine import get_diagnosis, answer_question
 import database
 
+
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
+
 app = FastAPI(
     title="AgroVision Rover Pipeline API",
-    version="5.0",
-    description="YOLO + MobileNet + Gemini LLM + persistent geotagged disease memory"
+    version="6.0",
+    description="Plant detection, disease classification and AI diagnosis"
 )
 
 app.add_middleware(
@@ -27,10 +34,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_FOLDER = "temp"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_FOLDER = BASE_DIR / "temp"
+UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
-NO_RESULT_STATUSES = {"No Target Object Spotted", "Invalid Image", "Unrecognized / Low Confidence"}
+NO_RESULT_STATUSES = {
+    "No Target Object Spotted",
+    "Invalid Image",
+    "Unrecognized / Low Confidence"
+}
 
 
 class AskRequest(BaseModel):
@@ -39,96 +51,253 @@ class AskRequest(BaseModel):
     question: str
 
 
+# ============================================================
+# IMAGE CONVERSION
+# ============================================================
+
 def mat_to_base64(img_matrix):
+    """
+    Convert an OpenCV BGR image into a base64 JPEG.
+    Returns None if no image is available.
+    """
+
     if img_matrix is None:
         return None
-    ok, buffer = cv2.imencode('.jpg', img_matrix)
-    if not ok:
+
+    if not hasattr(img_matrix, "size") or img_matrix.size == 0:
         return None
-    return f"data:image/jpeg;base64,{base64.b64encode(buffer).decode('utf-8')}"
+
+    success, buffer = cv2.imencode(
+        ".jpg",
+        img_matrix,
+        [cv2.IMWRITE_JPEG_QUALITY, 90]
+    )
+
+    if not success:
+        return None
+
+    encoded = base64.b64encode(buffer).decode("utf-8")
+
+    return f"data:image/jpeg;base64,{encoded}"
 
 
-def _to_float_or_none(value):
+def to_float_or_none(value):
     if value is None or value == "":
         return None
+
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
 
 
+def normalize_confidence(value):
+    """
+    The prediction pipeline returns confidence as a fraction:
+    0.0 to 1.0.
+
+    The frontend receives confidence as a percentage:
+    0.0 to 100.0.
+    """
+
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if 0 <= confidence <= 1:
+        confidence *= 100
+
+    return round(confidence, 2)
+
+
+# ============================================================
+# RESPONSE BUILDER
+# ============================================================
+
 def build_response(result: dict, latitude=None, longitude=None):
-    disease = result["disease"]
-    confidence = result["confidence"]
-    is_valid = disease not in NO_RESULT_STATUSES
+
+    disease = result.get(
+        "disease",
+        "Unrecognized / Low Confidence"
+    )
+
     species = result.get("species", "Unknown")
     condition = result.get("condition", disease)
-    weed_count = result.get("weed_count", 0)
+
+    raw_confidence = result.get("confidence", 0.0)
+    confidence_percent = normalize_confidence(raw_confidence)
+
+    is_valid = (
+        disease not in NO_RESULT_STATUSES
+        and confidence_percent > 0
+    )
+
+    # --------------------------------------------------------
+    # AI DIAGNOSIS
+    # --------------------------------------------------------
 
     if is_valid:
-        diagnosis = get_diagnosis(species, condition, confidence)
+        try:
+            diagnosis = get_diagnosis(
+                species,
+                condition,
+                float(raw_confidence)
+            )
+
+        except Exception as exc:
+            print(f"[API] Diagnosis generation error: {exc}")
+
+            diagnosis = {
+                "severity": "UNKNOWN",
+                "recommendations": [],
+                "treatment": "AI diagnosis could not be generated."
+            }
+
     else:
         diagnosis = {
-            "severity": "CLEAR",
+            "severity": "N/A",
             "recommendations": [],
-            "treatment": "No targets detected in path.",
+            "treatment": "No confident plant disease diagnosis available."
         }
 
-    report_id = None
-    if is_valid:
-        # This is the actual "memory" — every real detection (disease OR
-        # healthy) gets a permanent, geotagged row. Only skipped for
-        # "No Target"/"Invalid Image" since there's nothing worth
-        # remembering there.
-        report_id = database.save_scan(
-            species=species,
-            condition=condition,
-            severity=diagnosis["severity"],
-            confidence=confidence,
-            treatment=diagnosis["treatment"],
-            recommendations=diagnosis["recommendations"],
-            thumbnail=mat_to_base64(result.get("cropped_leaf")),
-            latitude=latitude,
-            longitude=longitude,
-            weed_count=weed_count,
-        )
+    # --------------------------------------------------------
+    # DATABASE STORAGE
+    # --------------------------------------------------------
 
-    return JSONResponse({
+    report_id = None
+
+    if is_valid:
+        try:
+            report_id = database.save_scan(
+                species=species,
+                condition=condition,
+                severity=diagnosis.get("severity", "UNKNOWN"),
+                confidence=float(raw_confidence),
+                treatment=diagnosis.get("treatment", ""),
+                recommendations=diagnosis.get("recommendations", []),
+                thumbnail=mat_to_base64(
+                    result.get("cropped_leaf")
+                ),
+                latitude=latitude,
+                longitude=longitude,
+                weed_count=0
+            )
+
+        except Exception as exc:
+            print(f"[API] Database save error: {exc}")
+
+    # --------------------------------------------------------
+    # ALL ANNOTATED IMAGES
+    # --------------------------------------------------------
+
+    labeled_frame = mat_to_base64(
+        result.get("labeled_frame")
+    )
+
+    all_objects_frame = mat_to_base64(
+        result.get("all_objects_frame")
+    )
+
+    bounding_box_image = mat_to_base64(
+        result.get("bounding_box_image")
+    )
+
+    cropped_leaf = mat_to_base64(
+        result.get("cropped_leaf")
+    )
+
+    # Prefer the dedicated bounding-box image for display.
+    annotated_image = (
+        bounding_box_image
+        or all_objects_frame
+        or labeled_frame
+    )
+
+    # --------------------------------------------------------
+    # FINAL RESPONSE
+    # --------------------------------------------------------
+
+    response_data = {
         "success": disease != "Invalid Image",
+
         "report_id": report_id,
+
+        # Disease results
         "disease": disease,
         "species": species,
         "condition": condition,
-        "confidence": round(confidence * 100, 2) if is_valid else 0.0,
-        "severity": diagnosis["severity"],
-        "recommendations": diagnosis["recommendations"],
-        "treatment": diagnosis["treatment"],
-        "weed_count": weed_count,
+        "confidence": confidence_percent,
+
+        # AI diagnosis
+        "severity": diagnosis.get("severity", "N/A"),
+        "recommendations": diagnosis.get("recommendations", []),
+        "treatment": diagnosis.get("treatment", ""),
+
+        # Plant detection
+        "plant_locked": result.get("plant_locked", False),
+        "leaf_count": result.get("leaf_count", 0),
+        "detected_objects": result.get("detected_objects", []),
+
+        # Pest classification
+        "pest": result.get("pest"),
+        "pest_confidence": normalize_confidence(
+            result.get("pest_confidence", 0)
+        ),
+        "pest_status": result.get("pest_status"),
+        "pest_model_available": result.get(
+            "pest_model_available",
+            False
+        ),
+
+        # Image outputs
+        "labeled_frame": labeled_frame,
+        "all_objects_frame": all_objects_frame,
+        "bounding_box_image": bounding_box_image,
+        "cropped_frame": cropped_leaf,
+
+        # Main image for the frontend
+        "annotated_image": annotated_image,
+
+        # GPS
         "latitude": latitude,
         "longitude": longitude,
-        "labeled_frame": mat_to_base64(result.get("labeled_frame")),
-        "cropped_frame": mat_to_base64(result.get("cropped_leaf")),
-        "all_objects_frame": mat_to_base64(result.get("all_objects_frame")),
-        "detected_objects": result.get("detected_objects", []),
-        "timestamp": datetime.now().isoformat()
-    })
 
+        "timestamp": datetime.now().isoformat()
+    }
+
+    return JSONResponse(content=response_data)
+
+
+# ============================================================
+# BASIC ENDPOINTS
+# ============================================================
 
 @app.get("/")
 def home():
-    return {"status": "running", "message": "AgroVision Rover HUD Core Engine Operations"}
+    return {
+        "status": "running",
+        "message": "AgroVision Rover API is operational"
+    }
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "api": "AgroVision Rover"
+    }
 
 
 @app.get("/model")
 def model():
     return {
-        "model": "Compound Object Detection & Plant Disease Classification",
-        "frameworks": ["TensorFlow (MobileNetV2)", "Ultralytics (YOLOv8)", "Gemini"],
+        "model": "Plant Disease Classification and Object Detection",
+        "frameworks": [
+            "TensorFlow",
+            "Ultralytics YOLOv8",
+            "Groq AI"
+        ],
         "classes": len(CLASS_NAMES)
     }
 
@@ -138,98 +307,228 @@ def classes():
     return {"classes": CLASS_NAMES}
 
 
+# ============================================================
+# IMAGE UPLOAD PREDICTION
+# ============================================================
+
 @app.post("/predict")
 async def process_predict(
     file: UploadFile = File(...),
     latitude: Optional[str] = Form(None),
-    longitude: Optional[str] = Form(None),
+    longitude: Optional[str] = Form(None)
 ):
-    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}"
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    try:
-        result = predict_disease_pipeline(file_path)
-        return build_response(result, _to_float_or_none(latitude), _to_float_or_none(longitude))
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
 
+    if not file.filename:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "error": "No image filename provided."
+            }
+        )
+
+    extension = Path(file.filename).suffix.lower()
+
+    if extension not in {".jpg", ".jpeg", ".png"}:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "error": "Only JPG, JPEG and PNG images are supported."
+            }
+        )
+
+    filename = (
+        datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        + extension
+    )
+
+    file_path = UPLOAD_FOLDER / filename
+
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        result = predict_disease_pipeline(str(file_path))
+
+        return build_response(
+            result,
+            to_float_or_none(latitude),
+            to_float_or_none(longitude)
+        )
+
+    except Exception as exc:
+        print(f"[API] Upload prediction error: {exc}")
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(exc)
+            }
+        )
+
+    finally:
+        if file_path.exists():
+            file_path.unlink()
+
+
+# ============================================================
+# ESP32-CAM PREDICTION
+# ============================================================
 
 @app.post("/predict_esp32")
 async def process_esp32_predict(
     request: Request,
     latitude: Optional[float] = None,
-    longitude: Optional[float] = None,
+    longitude: Optional[float] = None
 ):
-    """lat/lon passed as query params for this raw-bytes endpoint,
-    e.g. POST /predict_esp32?latitude=12.97&longitude=77.59"""
-    image_bytes = await request.body()
-    filename = "esp32_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg"
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-    with open(file_path, "wb") as f:
-        f.write(image_bytes)
-    try:
-        result = predict_disease_pipeline(file_path)
-        return build_response(result, latitude, longitude)
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
 
+    image_bytes = await request.body()
+
+    if not image_bytes:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "error": "Empty image received from ESP32-CAM."
+            }
+        )
+
+    filename = (
+        "esp32_"
+        + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        + ".jpg"
+    )
+
+    file_path = UPLOAD_FOLDER / filename
+
+    try:
+        with open(file_path, "wb") as file:
+            file.write(image_bytes)
+
+        result = predict_disease_pipeline(str(file_path))
+
+        return build_response(
+            result,
+            latitude,
+            longitude
+        )
+
+    except Exception as exc:
+        print(f"[API] ESP32 prediction error: {exc}")
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(exc)
+            }
+        )
+
+    finally:
+        if file_path.exists():
+            file_path.unlink()
+
+
+# ============================================================
+# AI FOLLOW-UP CHAT
+# ============================================================
 
 @app.post("/ask")
 async def ask_question(req: AskRequest):
+
     try:
-        answer = answer_question(req.species, req.condition, req.question)
+        answer = answer_question(
+            req.species,
+            req.condition,
+            req.question
+        )
+
         return {"answer": answer}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"answer": f"Error: {e}"})
+
+    except Exception as exc:
+        print(f"[API] AI advisor error: {exc}")
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "answer": f"AI advisor error: {exc}"
+            }
+        )
 
 
 # ============================================================
-# MEMORY / MAP / REPORTS — this is the new part completing the loop
+# REPORTS AND AFFECTED AREAS
 # ============================================================
+
 @app.get("/affected-areas")
 def affected_areas():
-    """The rover's navigation code polls this to know where to go back to."""
-    return {"areas": database.get_affected_areas()}
+    return {
+        "areas": database.get_affected_areas()
+    }
 
 
 @app.get("/reports")
-def reports(species: Optional[str] = None, severity: Optional[str] = None, status: Optional[str] = None):
-    return {"reports": database.get_all_reports(species=species, severity=severity, status=status)}
+def reports(
+    species: Optional[str] = None,
+    severity: Optional[str] = None,
+    status: Optional[str] = None
+):
+    return {
+        "reports": database.get_all_reports(
+            species=species,
+            severity=severity,
+            status=status
+        )
+    }
 
 
 @app.get("/reports/{report_id}")
 def report_detail(report_id: int):
+
     report = database.get_report(report_id)
+
     if report is None:
-        return JSONResponse(status_code=404, content={"error": "Report not found"})
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Report not found"}
+        )
+
     return report
 
 
 @app.post("/reports/{report_id}/resolve")
 def resolve_report(report_id: int):
-    ok = database.mark_resolved(report_id)
-    if not ok:
-        return JSONResponse(status_code=404, content={"error": "Report not found"})
-    return {"success": True, "report_id": report_id, "status": "resolved"}
+
+    success = database.mark_resolved(report_id)
+
+    if not success:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Report not found"}
+        )
+
+    return {
+        "success": True,
+        "report_id": report_id,
+        "status": "resolved"
+    }
 
 
-@app.get("/weed-summary")
-def weed_summary():
-    """Answers 'which crop had how many weeds' across all scans."""
-    return {"summary": database.get_weed_summary()}
-
+# ============================================================
+# ABOUT
+# ============================================================
 
 @app.get("/about")
 def about():
     return {
         "developer": "AgroVision AI",
-        "version": "5.0",
-        "frameworks": ["TensorFlow", "Ultralytics YOLOv8", "Google Gemini", "SQLite"],
+        "version": "6.0",
+        "frameworks": [
+            "TensorFlow",
+            "Ultralytics YOLOv8",
+            "Groq AI",
+            "SQLite"
+        ]
     }
